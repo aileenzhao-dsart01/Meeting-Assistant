@@ -1,0 +1,36 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+model Meeting {
+  id           String   @id @default(cuid())
+  title        String
+  date         DateTime @default(now())
+  duration     Int?
+  status       String   @default("pending") // pending | uploading | transcribing | summarizing | complete | error
+  recordingUrl String?  // path to audio file
+  transcript   String?  // raw transcript text
+  summary      String?  // markdown summary
+  bulletPoints String?  // JSON array of bullet points
+  topics       String?  // JSON array of detected marketing topics
+  error        String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  tasks        Task[]
+}
+
+model Task {
+  id          String   @id @default(cuid())
+  meetingId   String
+  meeting     Meeting  @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  description String
+  assignee    String?
+  status      String   @default("open") // open | in_progress | done
+  priority    String?  // high | medium | low
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}

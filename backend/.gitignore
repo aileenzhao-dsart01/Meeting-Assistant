@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.env
+audio/*
+!audio/.gitkeep
+*.db
+*.db-journal
