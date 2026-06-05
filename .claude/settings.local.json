@@ -4,7 +4,8 @@
       "Bash(say -o '/Users/ranzhao/Documents/projects/Meeting Assistant/backend/audio/test-it-security.aiff' 'Okay everyone, let'\\\\''s run through the IT and security updates. The penetration test results came back and we have three critical vulnerabilities that need patching this week. Server upgrade for the production environment is scheduled for Saturday at 2 AM. Expected downtime is about two hours. The new call tracking system integration is complete and we'\\\\''re seeing about five hundred calls tracked per day. Our web development team completed the sprint, shipping the new contact form with reCAPTCHA. There'\\\\''s a ticket open for the SSL certificate renewal - it expires in fourteen days. Sarah from IT is working on the firewall rules update for the new remote access policy. We also need to schedule the quarterly security compliance audit before end of month.')",
       "Bash(afconvert '/Users/ranzhao/Documents/projects/Meeting Assistant/backend/audio/test-it-security.aiff' '/Users/ranzhao/Documents/projects/Meeting Assistant/backend/audio/test-it-security.wav' -f WAVE -d LEI16@16000)",
       "Bash(curl *)",
-      "Bash(npx tsc *)"
+      "Bash(npx tsc *)",
+      "Bash(python3 -m json.tool)"
     ]
   }
 }

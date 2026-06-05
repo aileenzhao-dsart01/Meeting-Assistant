@@ -24,7 +24,7 @@ backend/
 │   ├── db.ts                 # Prisma client
 │   ├── routes/
 │   │   ├── meetings.ts       # Meeting CRUD + audio upload + processing
-│   │   ├── transcript.ts     # Transcript & summary endpoints
+│   │   ├── transcripts.ts    # Transcript & summary endpoints
 │   │   └── tasks.ts          # Task list & update endpoints
 │   └── services/
 │       ├── transcription.ts  # Whisper orchestration (Python subprocess)

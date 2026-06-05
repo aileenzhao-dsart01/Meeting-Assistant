@@ -76,7 +76,15 @@ meetingRoutes.post("/", async (req: Request, res: Response) => {
     }
 
     const meeting = await prisma.meeting.create({ data: { title } });
-    res.status(201).json({ success: true, data: meeting });
+    res.status(201).json({
+      success: true,
+      data: {
+        ...meeting,
+        date: meeting.date.toISOString(),
+        createdAt: meeting.createdAt.toISOString(),
+        updatedAt: meeting.updatedAt.toISOString(),
+      },
+    });
   } catch (err) {
     res.status(500).json({ success: false, error: "Failed to create meeting" });
   }
@@ -190,6 +198,21 @@ meetingRoutes.get("/:id/audio", async (req: Request, res: Response) => {
       return;
     }
 
+    // Set proper content type based on file extension
+    const ext = path.extname(audioPath).toLowerCase();
+    const mimeTypes: Record<string, string> = {
+      ".wav": "audio/wav",
+      ".mp3": "audio/mpeg",
+      ".webm": "audio/webm",
+      ".mp4": "audio/mp4",
+      ".m4a": "audio/mp4",
+      ".ogg": "audio/ogg",
+      ".aiff": "audio/aiff",
+      ".flac": "audio/flac",
+    };
+    const contentType = mimeTypes[ext] || "application/octet-stream";
+
+    res.setHeader("Content-Type", contentType);
     res.sendFile(audioPath);
   } catch (err) {
     res.status(500).json({ success: false, error: "Failed to download audio" });
@@ -211,12 +234,29 @@ meetingRoutes.post("/:id/process", async (req: Request, res: Response) => {
       return;
     }
 
+    // Idempotency: don't start a second job if already processing
+    if (["transcribing", "summarizing"].includes(meeting.status)) {
+      res.status(202).json({
+        success: true,
+        data: { message: "Already processing", meetingId: meeting.id, status: meeting.status },
+      });
+      return;
+    }
+
+    // Reset error state if re-processing
+    if (meeting.status === "error") {
+      await prisma.meeting.update({
+        where: { id: meeting.id },
+        data: { error: null },
+      });
+    }
+
     // Kick off async processing (non-blocking)
     processMeeting(meeting.id).catch((err) =>
       console.error(`Processing failed for meeting ${meeting.id}:`, err)
     );
 
-    res.json({
+    res.status(202).json({
       success: true,
       data: { message: "Processing started", meetingId: meeting.id },
     });

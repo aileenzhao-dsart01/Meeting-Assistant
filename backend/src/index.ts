@@ -11,12 +11,20 @@ const app = express();
 // ---------- Middleware ----------
 app.use(
   cors({
-    origin: config.cors.origins,
-    methods: ["GET", "POST", "PATCH", "DELETE"],
+    origin: (origin, callback) => {
+      // Allow requests with no origin (curl, server-to-server)
+      if (!origin) return callback(null, true);
+      // Check against configured origins
+      if (config.cors.origins.includes(origin)) return callback(null, true);
+      // Allow any *.lovableproject.com preview URL
+      if (origin.endsWith(".lovableproject.com")) return callback(null, true);
+      callback(null, false);
+    },
+    methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type"],
   })
 );
-app.use(express.json());
+app.use(express.json({ limit: "1mb" }));
 
 // ---------- Routes ----------
 app.get("/api/health", (_req, res) => {

@@ -274,6 +274,59 @@ Fixing the language tells Whisper exactly what to expect, which significantly im
 
 ---
 
+## 9. Lovable Compatibility Gap Fixes
+
+> **Requirement:** Lovable UI checklist — CORS, idempotency, serialization, content-types, concurrency.
+
+### 9.1 CORS
+
+**File:** `src/index.ts`
+
+| Before | After |
+|--------|-------|
+| Static origin list with exact matches | Function-based origin: allows configured origins + any `*.lovableproject.com` URL |
+| Methods: `GET, POST, PATCH, DELETE` | Added `OPTIONS` (required for CORS preflight) |
+| `express.json()` with no limit | `express.json({ limit: "1mb" })` |
+
+### 9.2 Process Idempotency
+
+**File:** `src/routes/meetings.ts`
+
+| Before | After |
+|--------|-------|
+| Always started processing | Checks `status` — if already `transcribing` or `summarizing`, returns `202 { message: "Already processing" }` |
+| Always returned `200` | Returns `202 Accepted` |
+| No error reset | Clears `error` field when re-processing a failed meeting |
+
+### 9.3 Date Serialization
+
+**File:** `src/routes/meetings.ts` (Create endpoint)
+
+| Before | After |
+|--------|-------|
+| `res.json({ success: true, data: meeting })` (raw Prisma object with Date) | `date.toISOString()`, `createdAt.toISOString()`, `updatedAt.toISOString()` |
+
+### 9.4 Audio Download Content-Type
+
+**File:** `src/routes/meetings.ts` (Download endpoint)
+
+| Before | After |
+|--------|-------|
+| `res.sendFile(audioPath)` — no Content-Type header | Sets `Content-Type` based on file extension (`.wav` → `audio/wav`, `.mp3` → `audio/mpeg`, `.webm` → `audio/webm`, etc.) |
+
+### 9.5 Whisper Concurrency
+
+**File:** `src/services/transcription.ts`
+
+| Before | After |
+|--------|-------|
+| Every `/process` call could spawn a Python subprocess | **Semaphore** — only 1 transcription runs at a time; subsequent calls queue and run sequentially |
+| No queue mechanism | `enqueueTranscription()` with FIFO queue and `runQueued()` dequeuer |
+
+This prevents OOM when multiple long meetings are submitted simultaneously.
+
+---
+
 ## Summary: All Files Changed
 
 | File | Type of Change |
@@ -284,13 +337,17 @@ Fixing the language tells Whisper exactly what to expect, which significantly im
 | `src/config.ts` | Added `vadFilter`, `vadThreshold`, `language` to whisper config |
 | `.env` | Updated model to `small`, added VAD + language config |
 | `.env.example` | Updated to match `.env` |
-| `src/index.ts` | Updated import path (`transcript` → `transcripts`) |
+| `src/index.ts` | Updated import path, CORS function-based origin, OPTIONS method, express.json limit |
 | `src/routes/transcript.ts` | **Renamed** → `src/routes/transcripts.ts` |
-| `src/routes/meetings.ts` | `req.params.id` → `String(req.params.id)`, wired real transcription, renamed function call |
-| `src/routes/transcripts.ts` | `req.params.id` → `String(req.params.id)` |
-| `src/routes/tasks.ts` | `req.params.id` → `String(req.params.id)` |
-| `src/services/transcription.ts` | Increased timeout/buffer, language passthrough, better stderr handling |
+| `src/routes/meetings.ts` | `String(req.params.id)`, wired real transcription, renamed function, idempotent /process, 202 status, date serialization, audio Content-Type |
+| `src/routes/transcripts.ts` | `String(req.params.id)` |
+| `src/routes/tasks.ts` | `String(req.params.id)` |
+| `src/services/transcription.ts` | Timeout/buffer, language passthrough, semaphore-based concurrency bounding |
 | `scripts/transcribe.py` | Rewrote — added VAD, language arg, `condition_on_previous_text` |
-| `src/services/summarizer.ts` | Renamed function + interface, added empty transcript guard, better markdown output |
+| `src/services/summarizer.ts` | Renamed function + interface, empty transcript guard, structured markdown output |
 | `src/services/llm/deepseek.ts` | Overhauled system prompt — 20 topics, priority enforcement, hallucination guard |
 | `src/types/index.ts` | Removed dead code, simplified to API types only |
+| `CLAUDE.md` | Updated transcript.ts → transcripts.ts reference |
+| `REVISE.md` | **NEW** — this file |
+| `LOVABLE_PROMPT.md` | **NEW** — prompt for Lovable UI generation |
+
