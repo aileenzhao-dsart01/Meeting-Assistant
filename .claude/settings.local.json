@@ -5,7 +5,19 @@
       "Bash(afconvert '/Users/ranzhao/Documents/projects/Meeting Assistant/backend/audio/test-it-security.aiff' '/Users/ranzhao/Documents/projects/Meeting Assistant/backend/audio/test-it-security.wav' -f WAVE -d LEI16@16000)",
       "Bash(curl *)",
       "Bash(npx tsc *)",
-      "Bash(python3 -m json.tool)"
+      "Bash(python3 -m json.tool)",
+      "Bash(rm -rf \"/Users/ranzhao/.npm/_cacache\")",
+      "Bash(npm install *)",
+      "Bash(sudo chown -R 501:20 \"/Users/ranzhao/.npm\")",
+      "Bash(npm cache *)",
+      "Bash(npx --yes localtunnel --port 3001)",
+      "Bash(pip3 install *)",
+      "Bash(rm -rf \"/Users/ranzhao/.npm/_cacache/index-v5/19/50\")",
+      "Bash(npm_config_cache=/tmp/npm-cache npx --cache /tmp/npm-cache --yes localtunnel --port 3001)",
+      "Bash(open *)",
+      "Bash(pkill -f localtunnel)",
+      "Bash(npm_config_cache=/tmp/npm-cache npx --cache /tmp/npm-cache --yes localtunnel --port 3001 --subdomain meeting-assistant-api)",
+      "Bash(ssh -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 -R 80:localhost:3001 serveo.net)"
     ]
   }
 }

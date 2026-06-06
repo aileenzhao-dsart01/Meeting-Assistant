@@ -180,8 +180,96 @@ Professional, modern, clean — Linear / Notion / Vercel aesthetic.
 | Uploading audio | Upload progress indicator |
 | Deleting | Loading spinner on delete button + confirmation dialog |
 
+## Data Fetching with TanStack Query (React Query)
+Use TanStack Query for all API calls — it handles caching, auto-refetching, loading/error states, and polling out of the box.
+
+### Query Keys
+- `["meetings"]` — meeting list
+- `["meeting", id]` — single meeting detail
+- `["tasks", meetingId]` — tasks for a meeting
+
+### Auto-Polling for Real-time Status
+The backend processes meetings asynchronously. When you call POST /api/meetings/:id/process, it returns immediately (202) and the meeting status progresses:
+pending → uploading → transcribing → summarizing → complete | error
+
+**Use TanStack Query's refetchInterval for live polling:**
+
+```typescript
+// Auto-poll meeting detail every 3s while processing
+const { data, isLoading } = useQuery({
+  queryKey: ["meeting", meetingId],
+  queryFn: () => fetch(`/api/meetings/${meetingId}`).then(r => r.json()),
+  refetchInterval: (query) => {
+    const status = query.state.data?.data?.status;
+    // Poll every 3s while processing, stop when complete or error
+    if (status === "transcribing" || status === "summarizing") return 3000;
+    return false; // stop polling
+  },
+});
+```
+
+### Mutations
+
+```typescript
+// Create meeting
+const createMeeting = useMutation({
+  mutationFn: (title) => fetch("/api/meetings", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title }),
+  }).then(r => r.json()),
+  onSuccess: () => queryClient.invalidateQueries({ queryKey: ["meetings"] }),
+});
+
+// Update task
+const updateTask = useMutation({
+  mutationFn: ({ id, status }) => fetch(`/api/tasks/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ status }),
+  }).then(r => r.json()),
+  onSuccess: () => queryClient.invalidateQueries({ queryKey: ["tasks"] }),
+});
+```
+
+### Optimistic Updates (Tasks)
+When a user checks a task as "done", update the cache immediately before the API responds:
+
+```typescript
+const updateTask = useMutation({
+  mutationFn: ({ id, status }) => ...,
+  onMutate: async ({ id, status }) => {
+    await queryClient.cancelQueries({ queryKey: ["tasks"] });
+    const previous = queryClient.getQueryData(["tasks"]);
+    queryClient.setQueryData(["tasks"], (old) => ({
+      data: old.data.map(t => t.id === id ? { ...t, status } : t)
+    }));
+    return { previous };
+  },
+  onError: (err, vars, context) => {
+    queryClient.setQueryData(["tasks"], context.previous);
+  },
+  onSettled: () => queryClient.invalidateQueries({ queryKey: ["tasks"] }),
+});
+```
+
+### API Helper
+```typescript
+const API_BASE = "https://7dc1ed860c45c233-142-112-231-209.serveousercontent.com";
+
+async function api<T>(path: string, options?: RequestInit): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    headers: { "Content-Type": "application/json", ...options?.headers },
+    ...options,
+  });
+  const json = await res.json();
+  if (!json.success) throw new Error(json.error || "Request failed");
+  return json.data;
+}
+```
+
 ## Non-functional Requirements
-- Use fetch() for all API calls (no axios or other libraries needed)
+- Use TanStack Query for all data fetching (not raw fetch() calls in components)
 - Toast/notification system for success/error actions (top-right, auto-dismiss 4s)
 - Format dates with date-fns: relative for recent ("2 hours ago"), short format for older ("Jun 1")
 - duration in seconds → format as "32 min" or "1h 12m"
