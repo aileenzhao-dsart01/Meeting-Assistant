@@ -51,6 +51,131 @@ function enqueueTranscription(run: () => Promise<string>): Promise<string> {
   });
 }
 
+// ---------- Audio normalization ----------
+
+const FFMPEG_PATH = "/opt/homebrew/bin/ffmpeg";
+
+interface VolumeInfo {
+  meanVolume: number;  // dB
+  maxVolume: number;   // dB
+}
+
+/**
+ * Analyze audio file volume using ffmpeg volumedetect filter.
+ * Returns mean and max volume in dB.
+ */
+function analyzeVolume(audioPath: string): VolumeInfo {
+  const result = execSync(
+    `${FFMPEG_PATH} -i "${audioPath}" -af volumedetect -vn -sn -f null - 2>&1`,
+    { timeout: 30000, encoding: "utf-8" }
+  );
+
+  const meanMatch = result.match(/mean_volume:\s+(-?[\d.]+)\s*dB/);
+  const maxMatch = result.match(/max_volume:\s+(-?[\d.]+)\s*dB/);
+
+  return {
+    meanVolume: meanMatch ? parseFloat(meanMatch[1]) : -99,
+    maxVolume: maxMatch ? parseFloat(maxMatch[1]) : -99,
+  };
+}
+
+/**
+ * Check if ffmpeg is available for audio processing.
+ */
+function isFFmpegAvailable(): boolean {
+  try {
+    execSync(`${FFMPEG_PATH} -version`, { stdio: "pipe", timeout: 5000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Walk gain: boost volume gradually if the recording is too quiet.
+ * Uses ffmpeg loudnorm (EBU R128) for normalization + dynamic compression.
+ *
+ * @param audioPath - Original audio file path
+ * @returns Path to the normalized audio file (caller must clean up)
+ */
+function normalizeAudio(audioPath: string): string {
+  if (!config.audioNormalization.enabled) {
+    return audioPath;
+  }
+
+  if (!isFFmpegAvailable()) {
+    console.warn("  ⚠ ffmpeg not found, skipping audio normalization");
+    return audioPath;
+  }
+
+  const volume = analyzeVolume(audioPath);
+  const target = config.audioNormalization.targetLoudness;
+  const gainNeeded = Math.round(target - volume.meanVolume);
+
+  console.log(
+    `  → Audio: mean ${volume.meanVolume} dB, max ${volume.maxVolume} dB, ` +
+    `target ${target} dB (gain: +${Math.max(0, gainNeeded)} dB)`
+  );
+
+  // Only boost if below target (with 1 dB hysteresis to avoid processing close-to-target files)
+  if (gainNeeded <= 1) {
+    console.log(`  → Volume OK, no normalization needed`);
+    return audioPath;
+  }
+
+  const ext = path.extname(audioPath) || ".wav";
+  let normalizedPath = audioPath.replace(/(\.\w+)$/, "_normalized$1");
+  let counter = 1;
+  while (fs.existsSync(normalizedPath)) {
+    normalizedPath = audioPath.replace(/(\.\w+)$/, `_normalized_${counter}$1`);
+    counter++;
+  }
+
+  // If compression is enabled, use loudnorm + compression for best speech clarity
+  if (config.audioNormalization.enableCompression) {
+    // loudnorm normalizes to LUFS target; compressor evens out quiet/loud segments
+    const cmd =
+      `${FFMPEG_PATH} -i "${audioPath}" -af ` +
+      `"loudnorm=I=${target}:LRA=7:TP=-1.5,` +
+      `acompressor=threshold=0.2:ratio=4:attack=50:release=250" ` +
+      `-y "${normalizedPath}" 2>&1`;
+
+    try {
+      execSync(cmd, { timeout: 300000, encoding: "utf-8" }); // 5 min for long files
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`  ⚠ loudnorm failed (${msg.substring(0, 100)}), trying simple gain...`);
+
+      // Fallback: simple volume boost
+      const fallbackCmd =
+        `${FFMPEG_PATH} -i "${audioPath}" -af "volume=${Math.max(2, gainNeeded)}dB" ` +
+        `-y "${normalizedPath}" 2>&1`;
+      execSync(fallbackCmd, { timeout: 300000, encoding: "utf-8" });
+    }
+  } else {
+    // Simple gain boost
+    const cmd =
+      `${FFMPEG_PATH} -i "${audioPath}" -af "volume=${Math.max(2, gainNeeded)}dB" ` +
+      `-y "${normalizedPath}" 2>&1`;
+    try {
+      execSync(cmd, { timeout: 300000, encoding: "utf-8" });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`  ⚠ volume boost failed: ${msg.substring(0, 100)}`);
+      return audioPath; // return original if processing fails
+    }
+  }
+
+  const originalSize = fs.statSync(audioPath).size;
+  const normalizedSize = fs.statSync(normalizedPath).size;
+  console.log(
+    `  → Normalized audio: ${(originalSize / 1024 / 1024).toFixed(1)} MB → ` +
+    `${(normalizedSize / 1024 / 1024).toFixed(1)} MB`
+  );
+
+  return normalizedPath;
+}
+
 // ---------- Provider detection ----------
 
 /**
@@ -331,13 +456,39 @@ export async function transcribeAudio(
 
   console.log(`  → STT provider: ${provider}`);
 
-  if (provider === "deepgram") {
-    // Cloud — no concurrent queuing needed (handled by Deepgram infra)
-    const fileSizeMB = fs.statSync(audioPath).size / (1024 * 1024);
-    console.log(`  → Audio file: ${fileSizeMB.toFixed(1)} MB`);
-    return transcribeDeepgram(audioPath, lang);
+  // Step 1: Normalize audio volume before transcription
+  const originalPath = audioPath;
+  let normalizedPath: string | null = null;
+  try {
+    normalizedPath = normalizeAudio(audioPath);
+    if (normalizedPath !== audioPath) {
+      console.log(`  → Using normalized audio for transcription`);
+    }
+    audioPath = normalizedPath;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`  ⚠ Audio normalization failed (${msg}), using original`);
+    audioPath = originalPath;
   }
 
-  // Local — queued to avoid OOM
-  return transcribeLocal(audioPath, modelSize, lang, context);
+  try {
+    if (provider === "deepgram") {
+      const fileSizeMB = fs.statSync(audioPath).size / (1024 * 1024);
+      console.log(`  → Audio file: ${fileSizeMB.toFixed(1)} MB`);
+      return await transcribeDeepgram(audioPath, lang);
+    }
+
+    // Local — queued to avoid OOM
+    return await transcribeLocal(audioPath, modelSize, lang, context);
+  } finally {
+    // Clean up normalized temp file
+    if (normalizedPath && normalizedPath !== originalPath && fs.existsSync(normalizedPath)) {
+      try {
+        fs.unlinkSync(normalizedPath);
+        console.log(`  → Cleaned up normalized temp file`);
+      } catch {
+        // ignore cleanup errors
+      }
+    }
+  }
 }

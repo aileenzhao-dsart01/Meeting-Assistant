@@ -32,6 +32,15 @@ export const config = {
     },
   },
 
+  audioNormalization: {
+    enabled: process.env.AUDIO_NORMALIZE !== "false",
+    // Target loudness in dB (LUFS). -16 to -14 is typical for speech.
+    // Quieter recordings get boosted to this level.
+    targetLoudness: parseFloat(process.env.AUDIO_TARGET_LOUDNESS || "-14"),
+    // If true, also apply dynamic range compression to even out quiet/loud sections
+    enableCompression: process.env.AUDIO_COMPRESSION !== "false",
+  },
+
   whisper: {
     modelSize: process.env.WHISPER_MODEL_SIZE || "base",
     language: process.env.WHISPER_LANGUAGE || "en",
