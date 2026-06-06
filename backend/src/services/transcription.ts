@@ -356,7 +356,42 @@ async function transcribeDeepgram(audioPath: string, language?: string): Promise
   const model = config.stt.deepgram.model;
   const lang = language || config.whisper.language;
 
-  // Build query params — optimized for meeting transcription with accented speakers
+  // Step 1: Convert to WAV before sending (most reliable format for STT APIs)
+  // Browser-recorded webm (opus in webm container) can cause issues with Deepgram
+  let wavPath: string | null = null;
+  let audioToSend = audioPath;
+  const ext = path.extname(audioPath).toLowerCase();
+
+  try {
+    if (ext !== ".wav" && ext !== ".mp3") {
+      wavPath = audioPath.replace(/(\.\w+)$/, "_dgtemp.wav");
+      let counter = 1;
+      while (fs.existsSync(wavPath)) {
+        wavPath = audioPath.replace(/(\.\w+)$/, `_dgtemp_${counter}.wav`);
+        counter++;
+      }
+
+      execSync(
+        `${FFMPEG_PATH} -i "${audioPath}" -vn -ar 16000 -ac 1 -sample_fmt s16 -y "${wavPath}" 2>&1`,
+        { timeout: 120000, encoding: "utf-8" }
+      );
+
+      audioToSend = wavPath;
+      const origMB = (fs.statSync(audioPath).size / 1024 / 1024).toFixed(1);
+      const wavMB = (fs.statSync(wavPath).size / 1024 / 1024).toFixed(1);
+      console.log(`  → Converted ${ext} to WAV for Deepgram (${origMB} MB → ${wavMB} MB)`);
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`  ⚠ WAV conversion failed (${msg.substring(0, 100)}), sending original format`);
+    if (wavPath && fs.existsSync(wavPath)) {
+      try { fs.unlinkSync(wavPath); } catch { /* ignore */ }
+    }
+    wavPath = null;
+    audioToSend = audioPath;
+  }
+
+  // Build query params — optimized for meeting transcription
   const params: Record<string, string> = {
     model,
     smart_format: "true",
@@ -364,31 +399,19 @@ async function transcribeDeepgram(audioPath: string, language?: string): Promise
     diarize: "true",
     utterances: "true",
     paragraphs: "true",
-    // Improve number/date formatting for marketing metrics
     numerals: "true",
-    // Reduce filler words in the transcript
-    filler_words: "false",
   };
 
-  // Set language — for accented English, "en" (general) often outperforms "en-US"
   if (lang && lang !== "auto") {
-    // Map to Deepgram-compatible language codes
-    const dgLang = lang === "en" ? "en" : lang;
-    params["language"] = dgLang;
-    // Add language fallback for code-switching
-    if (dgLang !== "en") {
-      params["model"] = "nova-3";
-    }
-  } else if (!lang || lang === "auto") {
-    // Enable language detection for mixed-language meetings
-    params["model"] = "nova-3";
-    params["language"] = "en"; // fallback default
+    params["language"] = lang === "en" ? "en" : lang;
+  } else {
+    params["language"] = "en";
   }
 
-  console.log(`  → Sending to Deepgram API (model: ${params["model"]}, language: ${params["language"] || "auto"})...`);
+  const fileSizeMB = (fs.statSync(audioToSend).size / 1024 / 1024).toFixed(1);
+  console.log(`  → Sending to Deepgram API (model: ${model}, language: ${params["language"]}, file: ${fileSizeMB} MB)...`);
 
-  const audioBuffer = fs.readFileSync(audioPath);
-  const mimeType = getMimeType(audioPath);
+  const audioBuffer = fs.readFileSync(audioToSend);
 
   const response = await fetch(
     `https://api.deepgram.com/v1/listen?${new URLSearchParams(params).toString()}`,
@@ -396,11 +419,16 @@ async function transcribeDeepgram(audioPath: string, language?: string): Promise
       method: "POST",
       headers: {
         Authorization: `Token ${apiKey}`,
-        "Content-Type": mimeType,
+        "Content-Type": "audio/wav",
       },
       body: audioBuffer,
     }
   );
+
+  // Clean up temp WAV file
+  if (wavPath && fs.existsSync(wavPath)) {
+    try { fs.unlinkSync(wavPath); } catch { /* ignore */ }
+  }
 
   if (!response.ok) {
     const errorText = await response.text();
@@ -415,6 +443,12 @@ async function transcribeDeepgram(audioPath: string, language?: string): Promise
     throw new Error(`Deepgram error: ${data.error}`);
   }
 
+  // Log model info if available
+  if (data.metadata?.model_info) {
+    const info = Object.values(data.metadata.model_info)[0];
+    console.log(`  → Deepgram model: ${info?.name} v${info?.version}`);
+  }
+
   // Prefer utterance-level transcript with speaker labels for meetings
   const utterances = data.results?.utterances;
   if (utterances && utterances.length > 0) {
@@ -423,38 +457,39 @@ async function transcribeDeepgram(audioPath: string, language?: string): Promise
 
     const speakerTranscript = utterances
       .map((utt) => {
-        // Assign consistent speaker labels
+        const txt = (utt.transcript || "").trim();
+        if (!txt) return null;
         if (!speakerLabels.has(utt.speaker)) {
           speakerLabels.set(utt.speaker, `Speaker ${speakerCounter}`);
           speakerCounter++;
         }
         const label = speakerLabels.get(utt.speaker)!;
-        return `${label}: ${utt.transcript.trim()}`;
+        return `${label}: ${txt}`;
       })
+      .filter(Boolean)
       .join("\n\n");
 
-    // Also return the full plain transcript (no labels) for summarization
-    const fullTranscript = data.results?.channels?.[0]?.alternatives?.[0]?.transcript?.trim();
-
-    // Return speaker-labeled version; the raw full transcript is accessible if needed
-    console.log(`  → Deepgram: ${utterances.length} utterances, ${speakerCounter} speakers detected`);
-    return speakerTranscript;
+    if (speakerTranscript) {
+      console.log(`  → Deepgram: ${utterances.length} utterances, ${speakerCounter} speakers detected`);
+      return speakerTranscript;
+    }
   }
 
-  // Fallback: plain transcript (no utterances/diarization in response)
+  // Fallback: plain transcript
   const transcript = data.results?.channels?.[0]?.alternatives?.[0]?.transcript?.trim();
-
-  if (!transcript) {
-    throw new Error("Deepgram returned empty transcript");
+  if (transcript) {
+    return transcript;
   }
 
-  // Log model info if available
-  if (data.metadata?.model_info) {
-    const info = Object.values(data.metadata.model_info)[0];
-    console.log(`  → Deepgram model: ${info?.name} v${info?.version}`);
-  }
-
-  return transcript;
+  // Last resort: log full response for debugging, then throw
+  const responseSummary = JSON.stringify(data).substring(0, 2000);
+  console.error(`  ✗ Deepgram empty response. Raw preview: ${responseSummary}`);
+  throw new Error(
+    "Deepgram returned an empty transcript. This may mean:\n" +
+    "1. The audio file contains only silence or background noise\n" +
+    "2. The audio format is incompatible (try .wav or .mp3)\n" +
+    "3. No speech was detected in the recording"
+  );
 }
 
 // ---------- Public API ----------
