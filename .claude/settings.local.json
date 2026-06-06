@@ -17,7 +17,8 @@
       "Bash(open *)",
       "Bash(pkill -f localtunnel)",
       "Bash(npm_config_cache=/tmp/npm-cache npx --cache /tmp/npm-cache --yes localtunnel --port 3001 --subdomain meeting-assistant-api)",
-      "Bash(ssh -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 -R 80:localhost:3001 serveo.net)"
+      "Bash(ssh -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 -R 80:localhost:3001 serveo.net)",
+      "Bash(DATABASE_URL=\"postgresql://postgres.dageszeokedbmeqohzgt:m%2CLt%2FW53y8U%24kq%3F@aws-1-ca-central-1.pooler.supabase.com:6543/postgres\" npx prisma generate)"
     ]
   }
 }
