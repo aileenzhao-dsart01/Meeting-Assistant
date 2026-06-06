@@ -23,6 +23,15 @@ export const config = {
     ),
   },
 
+  stt: {
+    // "local" = faster-whisper (Python), "openai" = OpenAI Whisper API
+    provider: process.env.STT_PROVIDER || "local",
+    openai: {
+      apiKey: process.env.OPENAI_API_KEY || "",
+      model: process.env.STT_OPENAI_MODEL || "whisper-1",
+    },
+  },
+
   whisper: {
     modelSize: process.env.WHISPER_MODEL_SIZE || "base",
     language: process.env.WHISPER_LANGUAGE || "en",

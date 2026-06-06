@@ -21,13 +21,13 @@ services:
         value: deepseek
       - key: CORS_ORIGINS
         sync: false
-      - key: WHISPER_MODEL_SIZE
-        value: base
+      - key: STT_PROVIDER
+        value: openai
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: STT_OPENAI_MODEL
+        value: whisper-1
       - key: WHISPER_LANGUAGE
         value: en
-      - key: WHISPER_VAD_FILTER
-        value: "true"
-      - key: WHISPER_VAD_THRESHOLD
-        value: "0.4"
       - key: AUDIO_STORAGE_PATH
         value: ./audio
