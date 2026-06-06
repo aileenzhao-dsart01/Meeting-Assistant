@@ -16,8 +16,8 @@ app.use(
       if (!origin) return callback(null, true);
       // Check against configured origins
       if (config.cors.origins.includes(origin)) return callback(null, true);
-      // Allow any *.lovableproject.com preview URL
-      if (origin.endsWith(".lovableproject.com")) return callback(null, true);
+      // Allow any *.lovableproject.com or *.lovable.app preview URL
+      if (origin.endsWith(".lovableproject.com") || origin.endsWith(".lovable.app")) return callback(null, true);
       callback(null, false);
     },
     methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
