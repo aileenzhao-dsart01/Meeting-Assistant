@@ -92,3 +92,13 @@ npm run dev
 - The backend expects **Python 3** with `faster-whisper` installed on the server
 - Audio files are stored locally under `./audio/` (swap to S3/cloud storage for production)
 - CORS is configurable via `CORS_ORIGINS` env var
+  Backend (this repo)        Frontend (Lovable)
+  ─────────────────          ──────────────────
+  ┌─ Node.js/Express ┐      ┌─ React/Vite ───────┐
+  │  PostgreSQL       │      │  Dashboard UI      │
+  │  Whisper/Deepgram │◄────►│  (separate project)│
+  │  DeepSeek         │ HTTP │  in Lovable)       │
+  │  → :3001/api/*    │      │                    │
+  └──────────────────┘      └────────────────────┘
+          ↕                          ↕
+     Render / Tunnel           Lovable hosting
