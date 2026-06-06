@@ -1,8 +1,24 @@
 import { execSync, exec } from "child_process";
 import fs from "fs";
 import path from "path";
-import OpenAI from "openai";
 import { config } from "../config";
+
+// ---------- MIME types for audio upload ----------
+const MIME_TYPES: Record<string, string> = {
+  ".wav": "audio/wav",
+  ".mp3": "audio/mpeg",
+  ".webm": "audio/webm",
+  ".mp4": "audio/mp4",
+  ".m4a": "audio/mp4",
+  ".ogg": "audio/ogg",
+  ".aiff": "audio/aiff",
+  ".flac": "audio/flac",
+};
+
+function getMimeType(filePath: string): string {
+  const ext = path.extname(filePath).toLowerCase();
+  return MIME_TYPES[ext] || "application/octet-stream";
+}
 
 // ---------- Semaphore: only one local transcription at a time ----------
 interface QueueItem {
@@ -54,35 +70,36 @@ export function isWhisperAvailable(): boolean {
 
 /**
  * Determine which STT provider should be used.
- * - If config says "openai" and an API key is set → "openai"
- * - If config says "local" (or not set) and Python + faster-whisper is available → "local"
- * - Falls back to "openai" if available, otherwise throws
+ * Priority:
+ * 1. STT_PROVIDER=deepgram + DEEPGRAM_API_KEY → Deepgram Nova-2 (cloud)
+ * 2. STT_PROVIDER=local + Python faster-whisper → local
+ * 3. (Fallback) faster-whisper not found but DEEPGRAM_API_KEY is set → Deepgram
  */
-function resolveProvider(): "local" | "openai" {
+function resolveProvider(): "local" | "deepgram" {
   const preferred = config.stt.provider;
 
-  if (preferred === "openai") {
-    if (config.stt.openai.apiKey) return "openai";
+  if (preferred === "deepgram") {
+    if (config.stt.deepgram.apiKey) return "deepgram";
     throw new Error(
-      "STT provider is set to 'openai' but OPENAI_API_KEY is not configured."
+      "STT provider is set to 'deepgram' but DEEPGRAM_API_KEY is not configured."
     );
   }
 
   // Default / "local" path
   if (isWhisperAvailable()) return "local";
 
-  // Local not available — try OpenAI as fallback
-  if (config.stt.openai.apiKey) {
+  // Local not available — try Deepgram as fallback
+  if (config.stt.deepgram.apiKey) {
     console.warn(
-      "⚠ faster-whisper not found, falling back to OpenAI Whisper API."
+      "⚠ faster-whisper not found, falling back to Deepgram Nova-2 cloud API."
     );
-    return "openai";
+    return "deepgram";
   }
 
   throw new Error(
     "No speech-to-text provider available. " +
     "Install faster-whisper (pip install faster-whisper) " +
-    "or set STT_PROVIDER=openai and OPENAI_API_KEY in .env"
+    "or set STT_PROVIDER=deepgram and DEEPGRAM_API_KEY in .env"
   );
 }
 
@@ -118,28 +135,99 @@ async function transcribeLocal(
   });
 }
 
-// ---------- Cloud transcriber (OpenAI Whisper API) ----------
+// ---------- Cloud transcriber (Deepgram Nova-2) ----------
 
-async function transcribeOpenAI(
-  audioPath: string,
-  language: string
-): Promise<string> {
-  const openai = new OpenAI({ apiKey: config.stt.openai.apiKey });
+interface DeepgramWord {
+  word: string;
+  start: number;
+  end: number;
+  confidence: number;
+  speaker?: number;
+}
 
-  const model = config.stt.openai.model;
+interface DeepgramAlternative {
+  transcript: string;
+  confidence: number;
+  words: DeepgramWord[];
+  paragraphs?: {
+    paragraphs: Array<{
+      sentences: Array<{ text: string; start: number; end: number }>;
+      start: number;
+      end: number;
+    }>;
+  };
+}
+
+interface DeepgramChannel {
+  alternatives: DeepgramAlternative[];
+}
+
+interface DeepgramResult {
+  channels: DeepgramChannel[];
+}
+
+interface DeepgramResponse {
+  results?: DeepgramResult;
+  metadata?: {
+    duration: number;
+  };
+  error?: string;
+}
+
+async function transcribeDeepgram(audioPath: string, language?: string): Promise<string> {
+  const apiKey = config.stt.deepgram.apiKey;
+  const model = config.stt.deepgram.model;
   const lang = language || config.whisper.language;
 
-  console.log(`  → Sending to OpenAI Whisper API (model: ${model})...`);
-
-  const transcription = await openai.audio.transcriptions.create({
-    file: fs.createReadStream(audioPath),
+  // Build query params
+  const params = new URLSearchParams({
     model,
-    language: lang === "auto" ? undefined : lang,
-    response_format: "text",
+    smart_format: "true",
+    punctuate: "true",
+    diarize: "true",
+    utterances: "true",
   });
+  if (lang && lang !== "auto") {
+    params.set("language", lang);
+  }
 
-  // The return type is a string when response_format is "text"
-  return String(transcription).trim();
+  console.log(`  → Sending to Deepgram API (model: ${model})...`);
+
+  const audioBuffer = fs.readFileSync(audioPath);
+  const mimeType = getMimeType(audioPath);
+
+  const response = await fetch(
+    `https://api.deepgram.com/v1/listen?${params.toString()}`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Token ${apiKey}`,
+        "Content-Type": mimeType,
+      },
+      body: audioBuffer,
+    }
+  );
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(
+      `Deepgram API error (${response.status}): ${errorText.substring(0, 500)}`
+    );
+  }
+
+  const data = (await response.json()) as DeepgramResponse;
+
+  if (data.error) {
+    throw new Error(`Deepgram error: ${data.error}`);
+  }
+
+  const transcript = data.results?.channels?.[0]?.alternatives?.[0]?.transcript?.trim();
+
+  if (!transcript) {
+    throw new Error("Deepgram returned empty transcript");
+  }
+
+  return transcript;
 }
 
 // ---------- Public API ----------
@@ -148,13 +236,13 @@ async function transcribeOpenAI(
  * Transcribe an audio file using the configured STT provider.
  *
  * Provider priority:
- * 1. STT_PROVIDER=openai + OPENAI_API_KEY → OpenAI Whisper API (cloud)
+ * 1. STT_PROVIDER=deepgram + DEEPGRAM_API_KEY → Deepgram Nova-2 (cloud)
  * 2. STT_PROVIDER=local + Python faster-whisper → local (CPU, queued)
- * 3. (Fallback) faster-whisper not found but OPENAI_API_KEY is set → OpenAI
+ * 3. (Fallback) faster-whisper not found but DEEPGRAM_API_KEY is set → Deepgram
  *
  * @param audioPath - Absolute path to the audio file
  * @param modelSize - Whisper model size (local only: tiny/base/small/medium/large-v3)
- * @param language - Language code (ISO 639-1), defaults to config
+ * @param language - Language code (ISO 639-1), defaults to config or "en"
  * @param contextWords - Domain terms (local only, used as initial_prompt)
  * @returns The transcribed text
  */
@@ -174,9 +262,13 @@ export async function transcribeAudio(
 
   console.log(`  → STT provider: ${provider}`);
 
-  if (provider === "openai") {
-    return transcribeOpenAI(audioPath, lang);
+  if (provider === "deepgram") {
+    // Cloud — no concurrent queuing needed (handled by Deepgram infra)
+    const fileSizeMB = fs.statSync(audioPath).size / (1024 * 1024);
+    console.log(`  → Audio file: ${fileSizeMB.toFixed(1)} MB`);
+    return transcribeDeepgram(audioPath, lang);
   }
 
+  // Local — queued to avoid OOM
   return transcribeLocal(audioPath, modelSize, lang, context);
 }

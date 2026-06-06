@@ -24,11 +24,11 @@ export const config = {
   },
 
   stt: {
-    // "local" = faster-whisper (Python), "openai" = OpenAI Whisper API
+    // "local" = faster-whisper (Python), "deepgram" = Deepgram Nova-2 (cloud)
     provider: process.env.STT_PROVIDER || "local",
-    openai: {
-      apiKey: process.env.OPENAI_API_KEY || "",
-      model: process.env.STT_OPENAI_MODEL || "whisper-1",
+    deepgram: {
+      apiKey: process.env.DEEPGRAM_API_KEY || "",
+      model: process.env.STT_DEEPGRAM_MODEL || "nova-2",
     },
   },
 

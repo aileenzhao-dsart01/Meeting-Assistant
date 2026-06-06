@@ -22,11 +22,11 @@ services:
       - key: CORS_ORIGINS
         sync: false
       - key: STT_PROVIDER
-        value: openai
-      - key: OPENAI_API_KEY
+        value: deepgram
+      - key: DEEPGRAM_API_KEY
         sync: false
-      - key: STT_OPENAI_MODEL
-        value: whisper-1
+      - key: STT_DEEPGRAM_MODEL
+        value: nova-2
       - key: WHISPER_LANGUAGE
         value: en
       - key: AUDIO_STORAGE_PATH
