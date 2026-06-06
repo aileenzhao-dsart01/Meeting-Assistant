@@ -28,6 +28,7 @@ export const config = {
     language: process.env.WHISPER_LANGUAGE || "en",
     vadFilter: process.env.WHISPER_VAD_FILTER !== "false",
     vadThreshold: parseFloat(process.env.WHISPER_VAD_THRESHOLD || "0.4"),
+    contextWords: process.env.WHISPER_CONTEXT_WORDS || "",
   },
 
   cors: {

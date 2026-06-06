@@ -67,7 +67,8 @@ export function isWhisperAvailable(): boolean {
 export async function transcribeAudio(
   audioPath: string,
   modelSize: string = config.whisper.modelSize,
-  language?: string
+  language?: string,
+  contextWords?: string
 ): Promise<string> {
   if (!fs.existsSync(audioPath)) {
     throw new Error(`Audio file not found: ${audioPath}`);
@@ -81,12 +82,13 @@ export async function transcribeAudio(
 
   const scriptPath = path.resolve(__dirname, "..", "..", "scripts", "transcribe.py");
   const langArg = language || config.whisper.language;
+  const contextArg = contextWords || config.whisper.contextWords || "";
 
   // Run through the concurrency semaphore so only one Whisper process runs at a time
   return enqueueTranscription(() => {
     return new Promise<string>((resolve, reject) => {
       const child = exec(
-        `python3 "${scriptPath}" "${audioPath}" "${modelSize}" "${langArg}"`,
+        `python3 "${scriptPath}" "${audioPath}" "${modelSize}" "${langArg}" "${contextArg}"`,
         {
           timeout: 120 * 60 * 1000, // 2 hour timeout for long meetings + VAD processing
           maxBuffer: 50 * 1024 * 1024, // 50MB buffer for large transcripts

@@ -16,7 +16,8 @@ import os
 from faster_whisper import WhisperModel
 
 
-def transcribe(audio_path: str, model_size: str = "base", language: str = "en") -> str:
+def transcribe(audio_path: str, model_size: str = "base", language: str = "en",
+               context_words: str = "") -> str:
     """
     Run faster-whisper transcription on the given audio file with VAD filtering.
 
@@ -25,6 +26,10 @@ def transcribe(audio_path: str, model_size: str = "base", language: str = "en") 
     - Improves far-field accuracy (distant mics pick up noise, VAD removes it)
     - Speeds up long meetings (skips silence between speakers)
     - Helps multi-talker scenarios (focuses on speech segments only)
+
+    initial_prompt biases Whisper toward common domain terms (e.g. "JavaScript"
+    instead of "just script"). Pass a comma-separated list of words via
+    context_words parameter or the WHISPER_CONTEXT_WORDS env var.
 
     Returns the full transcript as a single string.
     """
@@ -38,6 +43,23 @@ def transcribe(audio_path: str, model_size: str = "base", language: str = "en") 
     # Language: None = auto-detect, "en" = force English (better for accented English),
     # or pass any ISO 639-1 code (e.g. "zh", "ja", "fr", "de", "es")
     lang_param = language if language and language.lower() != "auto" else None
+
+    # initial_prompt biases Whisper's language model toward specific terms.
+    # This is the single biggest improvement for accented / domain-specific speech.
+    # It helps Whisper pick "JavaScript" over "just script", "DeepSeek" over "deep seek", etc.
+    initial_prompt = None
+    if context_words.strip():
+        # Format: list of terms Whisper should favor
+        initial_prompt = context_words.strip()
+    else:
+        # Marketing & tech default context — covers common terms that Whisper often gets wrong with accents
+        initial_prompt = (
+            "JavaScript, TypeScript, DeepSeek, OpenAI, ChatGPT, Kubernetes, Docker, "
+            "A/B test, click-through rate, cost per lead, ROI, SEO, PPC, CRM, "
+            "reCAPTCHA, SSL certificate, firewall, bandwidth, database, API, "
+            "dashboard, analytics, conversion, pipeline, webinar, campaign, "
+            "budget, revenue, lead generation, roadmap, sprint, deployment"
+        )
 
     # VAD (Voice Activity Detection) parameters tuned for far-field recording:
     # - threshold: 0.5 is default; lower (e.g. 0.3) catches quieter speech from distance
@@ -58,6 +80,7 @@ def transcribe(audio_path: str, model_size: str = "base", language: str = "en") 
         beam_size=5,
         language=lang_param,
         condition_on_previous_text=True,
+        initial_prompt=initial_prompt,
         vad_filter=True,
         vad_parameters=vad_params,
     )
@@ -73,15 +96,16 @@ def transcribe(audio_path: str, model_size: str = "base", language: str = "en") 
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python3 transcribe.py <audio_path> [model_size]", file=sys.stderr)
+        print("Usage: python3 transcribe.py <audio_path> [model_size] [language] [context_words]", file=sys.stderr)
         sys.exit(1)
 
     audio_path = sys.argv[1]
     model_size = sys.argv[2] if len(sys.argv) > 2 else "base"
     language = sys.argv[3] if len(sys.argv) > 3 else "en"
+    context_words = sys.argv[4] if len(sys.argv) > 4 else ""
 
     try:
-        result = transcribe(audio_path, model_size, language)
+        result = transcribe(audio_path, model_size, language, context_words)
         print(result)
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
