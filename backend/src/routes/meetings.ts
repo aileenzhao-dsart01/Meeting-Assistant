@@ -121,6 +121,42 @@ meetingRoutes.get("/:id", async (req: Request, res: Response) => {
   }
 });
 
+// ---------- RENAME meeting ----------
+meetingRoutes.patch("/:id", async (req: Request, res: Response) => {
+  try {
+    const { title } = req.body;
+    if (!title || typeof title !== "string" || !title.trim()) {
+      res.status(400).json({ success: false, error: "Invalid title" });
+      return;
+    }
+
+    const meeting = await prisma.meeting.findUnique({
+      where: { id: String(req.params.id) },
+    });
+    if (!meeting) {
+      res.status(404).json({ success: false, error: "Meeting not found" });
+      return;
+    }
+
+    const updated = await prisma.meeting.update({
+      where: { id: String(req.params.id) },
+      data: { title: title.trim() },
+    });
+
+    res.json({
+      success: true,
+      data: {
+        ...updated,
+        date: updated.date.toISOString(),
+        createdAt: updated.createdAt.toISOString(),
+        updatedAt: updated.updatedAt.toISOString(),
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: "Failed to rename meeting" });
+  }
+});
+
 // ---------- DELETE meeting ----------
 meetingRoutes.delete("/:id", async (req: Request, res: Response) => {
   try {
