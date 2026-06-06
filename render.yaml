@@ -26,7 +26,7 @@ services:
       - key: DEEPGRAM_API_KEY
         sync: false
       - key: STT_DEEPGRAM_MODEL
-        value: nova-2
+        value: nova-3
       - key: WHISPER_LANGUAGE
         value: en
       - key: AUDIO_STORAGE_PATH

@@ -28,7 +28,7 @@ export const config = {
     provider: process.env.STT_PROVIDER || "local",
     deepgram: {
       apiKey: process.env.DEEPGRAM_API_KEY || "",
-      model: process.env.STT_DEEPGRAM_MODEL || "nova-2",
+      model: process.env.STT_DEEPGRAM_MODEL || "nova-3",
     },
   },
 

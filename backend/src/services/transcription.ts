@@ -137,18 +137,33 @@ async function transcribeLocal(
 
 // ---------- Cloud transcriber (Deepgram Nova-2) ----------
 
-interface DeepgramWord {
-  word: string;
+interface DeepgramUtterance {
   start: number;
   end: number;
   confidence: number;
-  speaker?: number;
+  channel: number;
+  transcript: string;
+  words: Array<{
+    word: string;
+    start: number;
+    end: number;
+    confidence: number;
+    speaker: number;
+  }>;
+  speaker: number;
+  id: string;
 }
 
 interface DeepgramAlternative {
   transcript: string;
   confidence: number;
-  words: DeepgramWord[];
+  words: Array<{
+    word: string;
+    start: number;
+    end: number;
+    confidence: number;
+    speaker?: number;
+  }>;
   paragraphs?: {
     paragraphs: Array<{
       sentences: Array<{ text: string; start: number; end: number }>;
@@ -164,13 +179,17 @@ interface DeepgramChannel {
 
 interface DeepgramResult {
   channels: DeepgramChannel[];
+  utterances?: DeepgramUtterance[];
+}
+
+interface DeepgramMetadata {
+  duration: number;
+  model_info?: Record<string, { name: string; version: string }>;
 }
 
 interface DeepgramResponse {
   results?: DeepgramResult;
-  metadata?: {
-    duration: number;
-  };
+  metadata?: DeepgramMetadata;
   error?: string;
 }
 
@@ -179,25 +198,42 @@ async function transcribeDeepgram(audioPath: string, language?: string): Promise
   const model = config.stt.deepgram.model;
   const lang = language || config.whisper.language;
 
-  // Build query params
-  const params = new URLSearchParams({
+  // Build query params — optimized for meeting transcription with accented speakers
+  const params: Record<string, string> = {
     model,
     smart_format: "true",
     punctuate: "true",
     diarize: "true",
     utterances: "true",
-  });
+    paragraphs: "true",
+    // Improve number/date formatting for marketing metrics
+    numerals: "true",
+    // Reduce filler words in the transcript
+    filler_words: "false",
+  };
+
+  // Set language — for accented English, "en" (general) often outperforms "en-US"
   if (lang && lang !== "auto") {
-    params.set("language", lang);
+    // Map to Deepgram-compatible language codes
+    const dgLang = lang === "en" ? "en" : lang;
+    params["language"] = dgLang;
+    // Add language fallback for code-switching
+    if (dgLang !== "en") {
+      params["model"] = "nova-3";
+    }
+  } else if (!lang || lang === "auto") {
+    // Enable language detection for mixed-language meetings
+    params["model"] = "nova-3";
+    params["language"] = "en"; // fallback default
   }
 
-  console.log(`  → Sending to Deepgram API (model: ${model})...`);
+  console.log(`  → Sending to Deepgram API (model: ${params["model"]}, language: ${params["language"] || "auto"})...`);
 
   const audioBuffer = fs.readFileSync(audioPath);
   const mimeType = getMimeType(audioPath);
 
   const response = await fetch(
-    `https://api.deepgram.com/v1/listen?${params.toString()}`,
+    `https://api.deepgram.com/v1/listen?${new URLSearchParams(params).toString()}`,
     {
       method: "POST",
       headers: {
@@ -221,10 +257,43 @@ async function transcribeDeepgram(audioPath: string, language?: string): Promise
     throw new Error(`Deepgram error: ${data.error}`);
   }
 
+  // Prefer utterance-level transcript with speaker labels for meetings
+  const utterances = data.results?.utterances;
+  if (utterances && utterances.length > 0) {
+    const speakerLabels = new Map<number, string>();
+    let speakerCounter = 0;
+
+    const speakerTranscript = utterances
+      .map((utt) => {
+        // Assign consistent speaker labels
+        if (!speakerLabels.has(utt.speaker)) {
+          speakerLabels.set(utt.speaker, `Speaker ${speakerCounter}`);
+          speakerCounter++;
+        }
+        const label = speakerLabels.get(utt.speaker)!;
+        return `${label}: ${utt.transcript.trim()}`;
+      })
+      .join("\n\n");
+
+    // Also return the full plain transcript (no labels) for summarization
+    const fullTranscript = data.results?.channels?.[0]?.alternatives?.[0]?.transcript?.trim();
+
+    // Return speaker-labeled version; the raw full transcript is accessible if needed
+    console.log(`  → Deepgram: ${utterances.length} utterances, ${speakerCounter} speakers detected`);
+    return speakerTranscript;
+  }
+
+  // Fallback: plain transcript (no utterances/diarization in response)
   const transcript = data.results?.channels?.[0]?.alternatives?.[0]?.transcript?.trim();
 
   if (!transcript) {
     throw new Error("Deepgram returned empty transcript");
+  }
+
+  // Log model info if available
+  if (data.metadata?.model_info) {
+    const info = Object.values(data.metadata.model_info)[0];
+    console.log(`  → Deepgram model: ${info?.name} v${info?.version}`);
   }
 
   return transcript;
