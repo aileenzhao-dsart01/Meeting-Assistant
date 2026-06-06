@@ -9,7 +9,7 @@ A backend service that records, transcribes, and summarizes marketing team meeti
 ## Tech Stack
 
 - **Backend:** Node.js + TypeScript + Express
-- **Database:** SQLite via Prisma ORM
+- **Database:** PostgreSQL (Supabase) via Prisma ORM
 - **STT:** faster-whisper (local Python)
 - **LLM:** DeepSeek API (OpenAI-compatible), with provider abstraction for Claude/OpenAI swap
 - **Frontend:** Lovable (separate project, consumes this API)

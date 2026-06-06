@@ -1,0 +1,1 @@
+Failed to load config file "/Users/ranzhao/Documents/projects/Meeting Assistant/backend" as a TypeScript/JavaScript module. Error: PrismaConfigEnvError: Cannot resolve environment variable: DATABASE_URL.
