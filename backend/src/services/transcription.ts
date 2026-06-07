@@ -145,10 +145,11 @@ export function normalizeAudio(audioPath: string): string {
     counter++;
   }
 
-  // Audio enhancement — aggressive speech isolation + max volume gain
-  // Tight band-pass (250-3600Hz) removes noise without voice distortion.
-  // Broad EQ boost at 2kHz for consonant clarity.
-  // No noise reduction, no dynaudnorm, no gate — pure filter + max gain.
+  // Audio enhancement — pronunciation clarity pipeline
+  // Wider band-pass (150-8000Hz) preserves consonant detail.
+  // 3-layer EQ: cut boxy 200Hz, boost consonant clarity at 3kHz,
+  // add presence at 6.5kHz for sibilants (s, sh, f, th).
+  // No noise reduction, no dynaudnorm, no gate — pure EQ + max gain.
   console.log(`  → Applying audio enhancement (mode: ${config.audioNormalization.clarityMode})...`);
 
   const mode = config.audioNormalization.clarityMode;
@@ -160,30 +161,35 @@ export function normalizeAudio(audioPath: string): string {
       case "basic":
         // Light bump: remove subsonic rumble + gentle volume
         filterChain = [
-          "highpass=f=60",
-          "lowpass=f=7500",
+          "highpass=f=100",
+          "lowpass=f=8000",
         ].join(",");
         if (effectiveGain > 1) filterChain += `,volume=${effectiveGain}dB`;
         break;
 
       case "speech":
       default:
-        // Max voice clarity: tight band-pass + speech EQ + aggressive gain
-        // No dynaudnorm (reduces volume) — just clean filter + boost to max
+        // Pronunciation clarity: wider band to preserve consonants + layered EQ
+        // Key frequencies. Consonant clarity lives in 2-4kHz (s, t, k) and
+        // 5-8kHz (sibilants, f, th). Keep lowpass at 8kHz for this.
         filterChain = [
-          "highpass=f=250",               // cut rumble
-          "lowpass=f=3600",               // cut noise
-          "equalizer=f=2000:t=h:w=1000:g=10", // boost speech clarity
+          "highpass=f=150",               // remove sub rumble only
+          "lowpass=f=8000",               // keep consonants (was 3600Hz)
+          "equalizer=f=200:t=h:w=150:g=-5", // cut boxy/muddy resonance
+          "equalizer=f=3000:t=h:w=1500:g=12", // strong consonant clarity boost
+          "equalizer=f=6500:t=h:w=2000:g=4",  // presence/air for sibilants
         ].join(",");
         if (effectiveGain > 1) filterChain += `,volume=${effectiveGain}dB`;
         break;
 
       case "max":
-        // Speech band + compression for very uneven recording levels
+        // Pronunciation clarity + compression for very uneven levels
         filterChain = [
-          "highpass=f=250",
-          "lowpass=f=3600",
-          "equalizer=f=2000:t=h:w=1000:g=10",
+          "highpass=f=150",
+          "lowpass=f=8000",
+          "equalizer=f=200:t=h:w=150:g=-5",
+          "equalizer=f=3000:t=h:w=1500:g=12",
+          "equalizer=f=6500:t=h:w=2000:g=4",
           "acompressor=threshold=0.15:ratio=4:attack=5:release=150",
         ].join(",");
         if (effectiveGain > 1) filterChain += `,volume=${effectiveGain}dB`;
@@ -211,7 +217,7 @@ export function normalizeAudio(audioPath: string): string {
     // Try basic mode
     if (mode !== "basic" && !fallbackOk) {
       try {
-        const fbChain = "highpass=f=60,lowpass=f=7500" +
+        const fbChain = "highpass=f=100,lowpass=f=8000" +
           (effectiveGain > 1 ? `,volume=${effectiveGain}dB` : "");
         execSync(
           `${FFMPEG_PATH} -i "${audioPath}" -af "${fbChain}" -c:a pcm_s16le -y "${normalizedPath}" 2>&1`,
