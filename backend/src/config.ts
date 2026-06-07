@@ -23,6 +23,16 @@ export const config = {
     ),
   },
 
+  storage: {
+    // "local" or "supabase" — local files are lost on Render restarts
+    provider: process.env.STORAGE_PROVIDER || "local",
+    supabase: {
+      url: process.env.SUPABASE_URL || "",
+      serviceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY || "",
+      bucket: process.env.SUPABASE_STORAGE_BUCKET || "meeting-audio",
+    },
+  },
+
   stt: {
     // "local" = faster-whisper (Python), "deepgram" = Deepgram Nova-3 (cloud)
     provider: process.env.STT_PROVIDER || "local",

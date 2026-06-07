@@ -4,26 +4,46 @@ import path from "path";
 import fs from "fs";
 import { config } from "../config";
 import { prisma } from "../db";
+import { getStorageProvider } from "../services/storage";
 
 export const meetingRoutes = Router();
 
-// Ensure audio storage exists
-if (!fs.existsSync(config.audio.storagePath)) {
-  fs.mkdirSync(config.audio.storagePath, { recursive: true });
-}
-
-// Multer setup for audio uploads
-const storage = multer.diskStorage({
-  destination: (_req, _file, cb) => cb(null, config.audio.storagePath),
+// Multer setup for audio uploads (temporary local storage)
+const tmpStorage = multer.diskStorage({
+  destination: (_req, _file, cb) => {
+    // Use OS temp dir for multer — storage provider handles persistence
+    const tmpDir = path.resolve(config.audio.storagePath, ".upload-tmp");
+    if (!fs.existsSync(tmpDir)) {
+      fs.mkdirSync(tmpDir, { recursive: true });
+    }
+    cb(null, tmpDir);
+  },
   filename: (_req, file, cb) => {
     const uniqueSuffix = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
     cb(null, `${uniqueSuffix}${path.extname(file.originalname)}`);
   },
 });
 const upload = multer({
-  storage,
+  storage: tmpStorage,
   limits: { fileSize: 200 * 1024 * 1024 }, // 200MB max
 });
+
+// MIME types map for audio content
+const MIME_TYPES: Record<string, string> = {
+  ".wav": "audio/wav",
+  ".mp3": "audio/mpeg",
+  ".webm": "audio/webm",
+  ".mp4": "audio/mp4",
+  ".m4a": "audio/mp4",
+  ".ogg": "audio/ogg",
+  ".aiff": "audio/aiff",
+  ".flac": "audio/flac",
+};
+
+function getMimeType(filename: string): string {
+  const ext = path.extname(filename).toLowerCase();
+  return MIME_TYPES[ext] || "application/octet-stream";
+}
 
 // ---------- LIST meetings ----------
 meetingRoutes.get("/", async (req: Request, res: Response) => {
@@ -168,12 +188,10 @@ meetingRoutes.delete("/:id", async (req: Request, res: Response) => {
       return;
     }
 
-    // Delete audio file if exists
+    // Delete audio from storage provider
     if (meeting.recordingUrl) {
-      const audioPath = path.resolve(config.audio.storagePath, meeting.recordingUrl);
-      if (fs.existsSync(audioPath)) {
-        fs.unlinkSync(audioPath);
-      }
+      const storage = getStorageProvider();
+      await storage.delete(meeting.recordingUrl);
     }
 
     await prisma.meeting.delete({ where: { id: String(req.params.id) } });
@@ -202,24 +220,35 @@ meetingRoutes.post(
         return;
       }
 
-      // Verify the file was actually written to disk
-      const savedPath = path.resolve(config.audio.storagePath, req.file.filename);
-      if (!fs.existsSync(savedPath)) {
-        res.status(500).json({ success: false, error: "Audio file was not saved to disk" });
+      const tmpPath = req.file.path;
+      const filename = req.file.filename;
+
+      // Check the temp file exists and has content
+      if (!fs.existsSync(tmpPath)) {
+        res.status(500).json({ success: false, error: "Audio file was not saved to temp disk" });
         return;
       }
 
-      const fileSize = fs.statSync(savedPath).size;
+      const fileSize = fs.statSync(tmpPath).size;
       if (fileSize === 0) {
-        fs.unlinkSync(savedPath);
+        fs.unlinkSync(tmpPath);
         res.status(400).json({ success: false, error: "Uploaded audio file is empty" });
         return;
       }
 
+      // Save to the configured storage provider (local disk or Supabase)
+      const storage = getStorageProvider();
+      const mimeType = getMimeType(filename);
+      const data = fs.readFileSync(tmpPath);
+      await storage.save(filename, data, mimeType);
+
+      // Clean up temp file
+      try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
+
       const updated = await prisma.meeting.update({
         where: { id: String(req.params.id) },
         data: {
-          recordingUrl: req.file.filename,
+          recordingUrl: filename,
           status: "uploading",
         },
       });
@@ -242,28 +271,35 @@ meetingRoutes.get("/:id/audio", async (req: Request, res: Response) => {
       return;
     }
 
-    const audioPath = path.resolve(config.audio.storagePath, meeting.recordingUrl);
-    if (!fs.existsSync(audioPath)) {
-      res.status(404).json({ success: false, error: "Audio file not found on disk" });
+    const storage = getStorageProvider();
+
+    // Check existence
+    if (!(await storage.exists(meeting.recordingUrl))) {
+      res.status(404).json({ success: false, error: "Audio file not found" });
       return;
     }
 
-    // Set proper content type based on file extension
-    const ext = path.extname(audioPath).toLowerCase();
-    const mimeTypes: Record<string, string> = {
-      ".wav": "audio/wav",
-      ".mp3": "audio/mpeg",
-      ".webm": "audio/webm",
-      ".mp4": "audio/mp4",
-      ".m4a": "audio/mp4",
-      ".ogg": "audio/ogg",
-      ".aiff": "audio/aiff",
-      ".flac": "audio/flac",
-    };
-    const contentType = mimeTypes[ext] || "application/octet-stream";
+    // Try public URL first (for Supabase — direct browser streaming)
+    const publicUrl = storage.getPublicUrl(meeting.recordingUrl);
+    if (publicUrl) {
+      // Supabase bucket is public — redirect to the CDN URL for efficient streaming
+      // The frontend browser will fetch directly from Supabase CDN
+      const mimeType = getMimeType(meeting.recordingUrl);
+      res.setHeader("Content-Type", mimeType);
+      res.redirect(publicUrl);
+      return;
+    }
 
-    res.setHeader("Content-Type", contentType);
-    res.sendFile(audioPath);
+    // Local storage fallback: stream the file
+    const data = await storage.read(meeting.recordingUrl);
+    if (!data) {
+      res.status(404).json({ success: false, error: "Audio file not found" });
+      return;
+    }
+
+    const mimeType = getMimeType(meeting.recordingUrl);
+    res.setHeader("Content-Type", mimeType);
+    res.send(data);
   } catch (err) {
     res.status(500).json({ success: false, error: "Failed to download audio" });
   }
@@ -284,19 +320,12 @@ meetingRoutes.post("/:id/process", async (req: Request, res: Response) => {
       return;
     }
 
-    // Verify the audio file actually exists on disk before starting
-    const audioPath = path.resolve(config.audio.storagePath, meeting.recordingUrl);
-    if (!fs.existsSync(audioPath)) {
+    // Verify the audio file exists in storage
+    const storage = getStorageProvider();
+    if (!(await storage.exists(meeting.recordingUrl))) {
       res.status(400).json({
         success: false,
-        error: `Audio file "${meeting.recordingUrl}" not found on server disk. The upload may have failed. Please upload the audio again.`,
-      });
-      return;
-    }
-    if (fs.statSync(audioPath).size === 0) {
-      res.status(400).json({
-        success: false,
-        error: "Audio file is empty (0 bytes). Please upload again.",
+        error: `Audio file "${meeting.recordingUrl}" not found in storage. The upload may have failed. Please upload again.`,
       });
       return;
     }
@@ -334,6 +363,8 @@ meetingRoutes.post("/:id/process", async (req: Request, res: Response) => {
 
 // ---------- Async processing pipeline ----------
 async function processMeeting(meetingId: string) {
+  let audioTmpPath: string | null = null;
+
   try {
     // 1. Transcribe
     await prisma.meeting.update({
@@ -344,13 +375,19 @@ async function processMeeting(meetingId: string) {
     const meeting = await prisma.meeting.findUniqueOrThrow({
       where: { id: meetingId },
     });
-    const audioPath = path.resolve(
-      config.audio.storagePath,
-      meeting.recordingUrl!
-    );
+
+    // Download audio from storage to a temp file for processing
+    const storage = getStorageProvider();
+    const audioData = await storage.read(meeting.recordingUrl!);
+    if (!audioData) {
+      throw new Error(`Audio file "${meeting.recordingUrl}" not found in storage`);
+    }
+
+    audioTmpPath = path.resolve(config.audio.storagePath, `.process-${meeting.recordingUrl}`);
+    fs.writeFileSync(audioTmpPath, audioData);
 
     const { transcribeAudio } = await import("../services/transcription");
-    const transcript = await transcribeAudio(audioPath);
+    const transcript = await transcribeAudio(audioTmpPath);
 
     await prisma.meeting.update({
       where: { id: meetingId },
@@ -393,5 +430,10 @@ async function processMeeting(meetingId: string) {
       where: { id: meetingId },
       data: { status: "error", error: message },
     });
+  } finally {
+    // Clean up temp processing file
+    if (audioTmpPath && fs.existsSync(audioTmpPath)) {
+      try { fs.unlinkSync(audioTmpPath); } catch { /* ignore */ }
+    }
   }
 }
