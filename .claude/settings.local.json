@@ -38,7 +38,8 @@
       "Bash(nslookup reporters-vector-utilize-sizes.trycloudflare.com)",
       "Bash(dig reporters-vector-utilize-sizes.trycloudflare.com @8.8.8.8)",
       "Bash(kill 3643)",
-      "Bash(python3 -c ' *)"
+      "Bash(python3 -c ' *)",
+      "WebFetch(domain:supabase.com)"
     ]
   }
 }
