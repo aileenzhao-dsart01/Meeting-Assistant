@@ -33,3 +33,5 @@ services:
         value: en
       - key: AUDIO_STORAGE_PATH
         value: ./audio
+      - key: AUDIO_CLARITY_MODE
+        value: speech

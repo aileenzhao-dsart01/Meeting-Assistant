@@ -43,8 +43,11 @@ export const config = {
     // Target loudness in dB (LUFS). -16 to -14 is typical for speech.
     // Quieter recordings get boosted to this level.
     targetLoudness: parseFloat(process.env.AUDIO_TARGET_LOUDNESS || "-14"),
-    // If true, also apply dynamic range compression to even out quiet/loud sections
-    enableCompression: process.env.AUDIO_COMPRESSION !== "false",
+    // Audio clarity enhancement mode:
+    // "basic"  = rumble removal + volume boost (fast, reliable)
+    // "speech" = basic + noise reduction + speech clarity EQ + de-esser
+    // "max"    = speech + compression + dynamic normalization (loudest, clearest)
+    clarityMode: process.env.AUDIO_CLARITY_MODE || "max",
   },
 
   whisper: {
