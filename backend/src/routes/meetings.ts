@@ -296,24 +296,8 @@ meetingRoutes.get("/:id/audio", async (req: Request, res: Response) => {
 
     const storage = getStorageProvider();
 
-    // Check existence
-    if (!(await storage.exists(meeting.recordingUrl))) {
-      res.status(404).json({ success: false, error: "Audio file not found" });
-      return;
-    }
-
-    // Try public URL first (for Supabase — direct browser streaming)
-    const publicUrl = storage.getPublicUrl(meeting.recordingUrl);
-    if (publicUrl) {
-      // Supabase bucket is public — redirect to the CDN URL for efficient streaming
-      // The frontend browser will fetch directly from Supabase CDN
-      const mimeType = getMimeType(meeting.recordingUrl);
-      res.setHeader("Content-Type", mimeType);
-      res.redirect(publicUrl);
-      return;
-    }
-
-    // Local storage fallback: stream the file
+    // Read and stream the file directly — always, never redirect.
+    // (Supabase CDN redirects require bucket CORS config that may not be set.)
     const data = await storage.read(meeting.recordingUrl);
     if (!data) {
       res.status(404).json({ success: false, error: "Audio file not found" });
