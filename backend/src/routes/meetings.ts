@@ -202,6 +202,20 @@ meetingRoutes.post(
         return;
       }
 
+      // Verify the file was actually written to disk
+      const savedPath = path.resolve(config.audio.storagePath, req.file.filename);
+      if (!fs.existsSync(savedPath)) {
+        res.status(500).json({ success: false, error: "Audio file was not saved to disk" });
+        return;
+      }
+
+      const fileSize = fs.statSync(savedPath).size;
+      if (fileSize === 0) {
+        fs.unlinkSync(savedPath);
+        res.status(400).json({ success: false, error: "Uploaded audio file is empty" });
+        return;
+      }
+
       const updated = await prisma.meeting.update({
         where: { id: String(req.params.id) },
         data: {
@@ -267,6 +281,23 @@ meetingRoutes.post("/:id/process", async (req: Request, res: Response) => {
     }
     if (!meeting.recordingUrl) {
       res.status(400).json({ success: false, error: "No audio uploaded yet" });
+      return;
+    }
+
+    // Verify the audio file actually exists on disk before starting
+    const audioPath = path.resolve(config.audio.storagePath, meeting.recordingUrl);
+    if (!fs.existsSync(audioPath)) {
+      res.status(400).json({
+        success: false,
+        error: `Audio file "${meeting.recordingUrl}" not found on server disk. The upload may have failed. Please upload the audio again.`,
+      });
+      return;
+    }
+    if (fs.statSync(audioPath).size === 0) {
+      res.status(400).json({
+        success: false,
+        error: "Audio file is empty (0 bytes). Please upload again.",
+      });
       return;
     }
 
