@@ -35,3 +35,11 @@ services:
         value: ./audio
       - key: AUDIO_CLARITY_MODE
         value: speech
+      - key: STORAGE_PROVIDER
+        value: supabase
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_STORAGE_BUCKET
+        value: meeting-audio
