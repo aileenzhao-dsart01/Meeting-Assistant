@@ -161,26 +161,26 @@ function normalizeAudio(audioPath: string): string {
 
       case "speech":
       default:
-        // Smart: band-pass only speech frequencies, cut room resonance, boost clarity
+        // Band-pass speech frequencies + boost proportionally to how quiet it is
         filterChain = [
-          "highpass=f=200",               // cut all rumble, AC, traffic below voice
-          "lowpass=f=4500",               // cut all hiss, kids, noise above voice
+          "highpass=f=200",               // cut rumble, AC, traffic
+          "lowpass=f=4500",               // cut hiss, kids, high noise
           "equalizer=f=150:t=h:w=100:g=-6", // cut boxy room sound
-          "equalizer=f=2500:t=h:w=800:g=6", // boost speech consonants for clarity
+          "equalizer=f=2500:t=h:w=800:g=6", // boost speech consonants
         ].join(",");
-        if (gainNeeded > 1) filterChain += `,volume=${Math.min(gainNeeded, 6)}dB`; // cap at 6dB
+        if (gainNeeded > 1) filterChain += `,volume=${Math.min(Math.max(gainNeeded, 2), 24)}dB`;
         break;
 
       case "max":
-        // Speech band + gentle compression for very uneven levels
+        // Speech band + compression for very uneven levels
         filterChain = [
           "highpass=f=200",
           "lowpass=f=4500",
           "equalizer=f=150:t=h:w=100:g=-6",
           "equalizer=f=2500:t=h:w=800:g=6",
-          "acompressor=threshold=0.2:ratio=3:attack=5:release=100", // gentle, no makeup
+          "acompressor=threshold=0.15:ratio=4:attack=5:release=150",
         ].join(",");
-        if (gainNeeded > 1) filterChain += `,volume=${Math.min(gainNeeded, 6)}dB`;
+        if (gainNeeded > 1) filterChain += `,volume=${Math.min(Math.max(gainNeeded, 2), 24)}dB`;
         break;
     }
 
