@@ -37,7 +37,8 @@
       "Bash(/opt/homebrew/bin/cloudflared tunnel *)",
       "Bash(nslookup reporters-vector-utilize-sizes.trycloudflare.com)",
       "Bash(dig reporters-vector-utilize-sizes.trycloudflare.com @8.8.8.8)",
-      "Bash(kill 3643)"
+      "Bash(kill 3643)",
+      "Bash(python3 -c ' *)"
     ]
   }
 }
