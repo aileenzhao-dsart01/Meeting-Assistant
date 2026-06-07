@@ -27,6 +27,8 @@ services:
         sync: false
       - key: STT_DEEPGRAM_MODEL
         value: nova-3
+      - key: DEEPGRAM_FILTER_FILLER
+        value: "true"
       - key: WHISPER_LANGUAGE
         value: en
       - key: AUDIO_STORAGE_PATH

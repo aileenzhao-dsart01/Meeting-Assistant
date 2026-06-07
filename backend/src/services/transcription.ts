@@ -379,29 +379,38 @@ async function transcribeDeepgram(audioPath: string, language?: string): Promise
   }
 
   // Build query params — optimized for meeting transcription
-  const params: Record<string, string> = {
-    model,
-    smart_format: "true",
-    punctuate: "true",
-    diarize: "true",
-    utterances: "true",
-    paragraphs: "true",
-    numerals: "true",
-  };
+  // Use URLSearchParams directly for proper multi-value support (keywords)
+  const searchParams = new URLSearchParams();
+  searchParams.set("model", model);
+  searchParams.set("smart_format", "true");
+  searchParams.set("punctuate", "true");
+  searchParams.set("diarize", "true");
+  searchParams.set("utterances", "true");
+  searchParams.set("paragraphs", "true");
+  searchParams.set("numerals", "true");
+  searchParams.set("filler_words", config.stt.deepgram.filterFiller ? "false" : "true");
+
+  // Add keyterm boosting for speaker names and domain jargon
+  // Deepgram accepts multiple keywords params: ?keywords=term1&keywords=term2
+  if (config.stt.deepgram.keywords) {
+    for (const term of config.stt.deepgram.keywords.split(",").map(t => t.trim()).filter(Boolean)) {
+      searchParams.append("keywords", term);
+    }
+  }
 
   if (lang && lang !== "auto") {
-    params["language"] = lang === "en" ? "en" : lang;
+    searchParams.set("language", lang === "en" ? "en" : lang);
   } else {
-    params["language"] = "en";
+    searchParams.set("language", "en");
   }
 
   const fileSizeMB = (fs.statSync(audioToSend).size / 1024 / 1024).toFixed(1);
-  console.log(`  → Sending to Deepgram API (model: ${model}, language: ${params["language"]}, file: ${fileSizeMB} MB)...`);
+  console.log(`  → Sending to Deepgram API (model: ${model}, language: ${searchParams.get("language")}, file: ${fileSizeMB} MB)...`);
 
   const audioBuffer = fs.readFileSync(audioToSend);
 
   const response = await fetch(
-    `https://api.deepgram.com/v1/listen?${new URLSearchParams(params).toString()}`,
+    `https://api.deepgram.com/v1/listen?${searchParams.toString()}`,
     {
       method: "POST",
       headers: {

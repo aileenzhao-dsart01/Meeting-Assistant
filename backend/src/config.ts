@@ -24,11 +24,17 @@ export const config = {
   },
 
   stt: {
-    // "local" = faster-whisper (Python), "deepgram" = Deepgram Nova-2 (cloud)
+    // "local" = faster-whisper (Python), "deepgram" = Deepgram Nova-3 (cloud)
     provider: process.env.STT_PROVIDER || "local",
     deepgram: {
       apiKey: process.env.DEEPGRAM_API_KEY || "",
       model: process.env.STT_DEEPGRAM_MODEL || "nova-3",
+      // Comma-separated keyterms to boost (speaker names, jargon, brand terms)
+      // Each term can have a weight: "term:weight" — higher weight = more bias
+      // Example: "Ran Zhao:5,PPC:3,ROAS:3,LinkedIn Ads:2"
+      keywords: process.env.DEEPGRAM_KEYWORDS || "",
+      // Strip filler words (um, uh, like, you know) from transcript
+      filterFiller: process.env.DEEPGRAM_FILTER_FILLER !== "false",
     },
   },
 
