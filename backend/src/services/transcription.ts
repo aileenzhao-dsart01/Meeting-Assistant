@@ -139,9 +139,11 @@ export function normalizeAudio(audioPath: string): string {
     counter++;
   }
 
-  // Audio enhancement — speech frequency band enhancement
-  // Strategy: don't boost everything. Only boost frequencies where speech lives.
-  // Cut everything outside 200-4500Hz to remove noise without distorting voice.
+  // Audio enhancement — aggressive speech isolation
+  // Tighter band-pass (250-3600Hz) removes more noise without voice distortion.
+  // dynaudnorm normalizes dynamic range so quiet speech becomes audible.
+  // Boost voice clarity at 2kHz where consonant definition lives.
+  // No noise reduction (distorts voice). No noise gate (cuts quiet speech).
   console.log(`  → Applying audio enhancement (mode: ${config.audioNormalization.clarityMode})...`);
 
   const mode = config.audioNormalization.clarityMode;
@@ -161,23 +163,23 @@ export function normalizeAudio(audioPath: string): string {
 
       case "speech":
       default:
-        // Band-pass speech frequencies + boost proportionally to how quiet it is
+        // Aggressive speech isolation: tight band-pass + clarity EQ + dynamic normalization
         filterChain = [
-          "highpass=f=200",               // cut rumble, AC, traffic
-          "lowpass=f=4500",               // cut hiss, kids, high noise
-          "equalizer=f=150:t=h:w=100:g=-6", // cut boxy room sound
-          "equalizer=f=2500:t=h:w=800:g=6", // boost speech consonants
+          "highpass=f=250",               // aggressively cut room rumble, HVAC
+          "lowpass=f=3600",               // aggressively cut hiss, kids, high noise
+          "equalizer=f=2000:t=h:w=1000:g=10", // broad boost of speech clarity range
+          "dynaudnorm=f=200",             // normalize volume without clipping
         ].join(",");
         if (gainNeeded > 1) filterChain += `,volume=${Math.min(Math.max(gainNeeded, 2), 24)}dB`;
         break;
 
       case "max":
-        // Speech band + compression for very uneven levels
+        // Speech band + compression for very uneven levels + dynamic normalization
         filterChain = [
-          "highpass=f=200",
-          "lowpass=f=4500",
-          "equalizer=f=150:t=h:w=100:g=-6",
-          "equalizer=f=2500:t=h:w=800:g=6",
+          "highpass=f=250",
+          "lowpass=f=3600",
+          "equalizer=f=2000:t=h:w=1000:g=10",
+          "dynaudnorm=f=200",
           "acompressor=threshold=0.15:ratio=4:attack=5:release=150",
         ].join(",");
         if (gainNeeded > 1) filterChain += `,volume=${Math.min(Math.max(gainNeeded, 2), 24)}dB`;
