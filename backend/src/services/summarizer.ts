@@ -4,14 +4,20 @@ import { createProvider } from "./llm";
 let provider: LLMProvider | null = null;
 
 /**
- * Get or initialize the LLM provider.
- * Lazy initialization so config is ready when first called.
+ * Get or initialize the default LLM provider (cached singleton).
  */
 async function getProvider(): Promise<LLMProvider> {
   if (!provider) {
     provider = createProvider();
   }
   return provider;
+}
+
+export interface LlmOverride {
+  provider: string;
+  apiKey?: string;
+  model?: string;
+  baseURL?: string;
 }
 
 export interface SummarizedMeeting {
@@ -24,16 +30,29 @@ export interface SummarizedMeeting {
 
 /**
  * Summarize a meeting transcript using the configured LLM provider.
+ * Optionally accepts an LLM override from user-provided headers.
  */
 export async function summarizeMeeting(
   transcript: string,
-  options?: { meetingTitle?: string; marketingTopics?: string[] }
+  options?: {
+    meetingTitle?: string;
+    marketingTopics?: string[];
+    llmOverride?: LlmOverride;
+  }
 ): Promise<SummarizedMeeting> {
   if (!transcript || transcript.trim().length < 20) {
     throw new Error("Transcript is too short or empty — cannot generate summary");
   }
 
-  const llm = await getProvider();
+  // Use user-provided LLM config if supplied, otherwise use the default
+  let llm: LLMProvider;
+  if (options?.llmOverride?.provider && options?.llmOverride?.apiKey) {
+    llm = createProvider(options.llmOverride);
+    console.log(`  → Using user-provided LLM: ${options.llmOverride.provider}/${options.llmOverride.model || "default"}`);
+  } else {
+    llm = await getProvider();
+  }
+
   const result = await llm.summarize(transcript, options);
 
   // Generate a structured markdown summary

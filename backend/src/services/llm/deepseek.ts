@@ -1,6 +1,7 @@
 import OpenAI from "openai";
 import { LLMProvider, MeetingSummary } from "./interface";
 import { config } from "../../config";
+import { LlmConfig } from "./index";
 
 const SYSTEM_PROMPT = `You are a senior meeting analyst for a business that covers marketing, sales, web development, IT, and cybersecurity. Your ONLY job is to analyze meeting transcripts and extract structured, actionable insights.
 
@@ -144,16 +145,31 @@ If the meeting is NOT about any recognized topic, return:
 }`;
 
 /**
- * DeepSeek LLM provider (OpenAI-compatible API).
+ * OpenAI-compatible LLM provider.
+ *
+ * Works with any OpenAI-compatible API:
+ * - DeepSeek (default): https://api.deepseek.com
+ * - OpenAI: https://api.openai.com/v1
+ * - Custom endpoints via override.baseURL
+ *
+ * Can be constructed with an override config from user headers,
+ * or uses the default config for the configured provider.
  */
 export class DeepSeekProvider implements LLMProvider {
-  readonly name = "deepseek";
+  readonly name: string;
   private client: OpenAI;
+  private model: string;
 
-  constructor() {
+  constructor(override?: LlmConfig) {
+    // Use override config if provided, otherwise fall back to defaults
+    const apiKey = override?.apiKey || config.llm.deepseek.apiKey;
+    const baseURL = override?.baseURL || "https://api.deepseek.com";
+    this.model = override?.model || config.llm.deepseek.model;
+    this.name = override?.provider || "deepseek";
+
     this.client = new OpenAI({
-      baseURL: "https://api.deepseek.com",
-      apiKey: config.llm.deepseek.apiKey,
+      baseURL,
+      apiKey,
     });
   }
 
@@ -181,10 +197,10 @@ export class DeepSeekProvider implements LLMProvider {
       .filter(Boolean)
       .join("\n");
 
-    console.log(`  → LLM: ${config.llm.deepseek.model} summarizing transcript (${transcript.length} chars)...`);
+    console.log(`  → LLM: ${this.name}/${this.model} summarizing transcript (${transcript.length} chars)...`);
 
     const response = await this.client.chat.completions.create({
-      model: config.llm.deepseek.model,
+      model: this.model,
       messages: [
         { role: "system", content: SYSTEM_PROMPT },
         { role: "user", content: userMessage },

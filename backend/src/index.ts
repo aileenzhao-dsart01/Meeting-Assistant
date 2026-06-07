@@ -21,7 +21,13 @@ app.use(
       callback(null, false);
     },
     methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type"],
+    allowedHeaders: [
+      "Content-Type",
+      "X-LLM-Provider",
+      "X-LLM-Key",
+      "X-LLM-Model",
+      "X-LLM-Base-URL",
+    ],
   })
 );
 app.use(express.json({ limit: "1mb" }));

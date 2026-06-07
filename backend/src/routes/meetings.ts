@@ -5,6 +5,7 @@ import fs from "fs";
 import { config } from "../config";
 import { prisma } from "../db";
 import { getStorageProvider } from "../services/storage";
+import { LlmOverride } from "../services/summarizer";
 
 export const meetingRoutes = Router();
 
@@ -373,8 +374,28 @@ meetingRoutes.post("/:id/process", async (req: Request, res: Response) => {
       });
     }
 
+    // Capture optional LLM override headers
+    const llmOverride: Partial<LlmOverride> = {};
+    if (req.headers["x-llm-provider"]) {
+      llmOverride.provider = String(req.headers["x-llm-provider"]);
+    }
+    if (req.headers["x-llm-key"]) {
+      llmOverride.apiKey = String(req.headers["x-llm-key"]);
+    }
+    if (req.headers["x-llm-model"]) {
+      llmOverride.model = String(req.headers["x-llm-model"]);
+    }
+    if (req.headers["x-llm-base-url"]) {
+      llmOverride.baseURL = String(req.headers["x-llm-base-url"]);
+    }
+
+    // Log which LLM is being used
+    if (llmOverride.provider && llmOverride.model) {
+      console.log(`  → LLM override from headers: ${llmOverride.provider}/${llmOverride.model}`);
+    }
+
     // Kick off async processing (non-blocking)
-    processMeeting(meeting.id).catch((err) =>
+    processMeeting(meeting.id, llmOverride).catch((err) =>
       console.error(`Processing failed for meeting ${meeting.id}:`, err)
     );
 
@@ -390,7 +411,10 @@ meetingRoutes.post("/:id/process", async (req: Request, res: Response) => {
 });
 
 // ---------- Async processing pipeline ----------
-async function processMeeting(meetingId: string) {
+async function processMeeting(
+  meetingId: string,
+  llmOverride?: { provider?: string; apiKey?: string; model?: string; baseURL?: string }
+) {
   let audioTmpPath: string | null = null;
 
   try {
@@ -424,7 +448,10 @@ async function processMeeting(meetingId: string) {
 
     // 2. Summarize
     const { summarizeMeeting } = await import("../services/summarizer");
-    const summary = await summarizeMeeting(transcript, { meetingTitle: meeting.title });
+    const summary = await summarizeMeeting(transcript, {
+      meetingTitle: meeting.title,
+      llmOverride: llmOverride?.provider ? (llmOverride as LlmOverride) : undefined,
+    });
 
     // Save summary + tasks
     await prisma.meeting.update({
