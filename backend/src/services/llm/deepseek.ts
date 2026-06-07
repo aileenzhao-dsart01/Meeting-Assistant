@@ -199,32 +199,77 @@ export class DeepSeekProvider implements LLMProvider {
 
     console.log(`  → LLM: ${this.name}/${this.model} summarizing transcript (${transcript.length} chars)...`);
 
-    const response = await this.client.chat.completions.create({
-      model: this.model,
-      messages: [
-        { role: "system", content: SYSTEM_PROMPT },
-        { role: "user", content: userMessage },
-      ],
-      temperature: 0.1,       // Low temperature for consistent structured output
-      max_tokens: 4096,       // Cap to avoid runaway responses on long meetings
-      response_format: { type: "json_object" },
-    });
-
-    const content = response.choices[0]?.message?.content;
-    if (!content) {
-      throw new Error("Empty response from DeepSeek API");
-    }
+    // Attempt 1: with response_format json_object (works on OpenAI-compatible APIs)
+    let content: string | null = null;
+    let usedJsonMode = true;
 
     try {
-      const parsed = JSON.parse(content) as MeetingSummary;
-      return {
-        bulletPoints: parsed.bulletPoints || [],
-        tasks: parsed.tasks || [],
-        futureProspects: parsed.futureProspects || [],
-        marketingTopics: parsed.marketingTopics || [],
-      };
-    } catch {
-      throw new Error(`Failed to parse DeepSeek response as JSON: ${content.slice(0, 200)}`);
+      const response = await this.client.chat.completions.create({
+        model: this.model,
+        messages: [
+          { role: "system", content: SYSTEM_PROMPT },
+          { role: "user", content: userMessage },
+        ],
+        temperature: 0.1,
+        max_tokens: 4096,
+        response_format: { type: "json_object" },
+      });
+      content = response.choices[0]?.message?.content ?? null;
+    } catch (err) {
+      // Some providers don't support response_format — fall through to retry
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`  ⚠ JSON mode failed (${msg.substring(0, 80)}), retrying without it...`);
+      content = null;
     }
+
+    // If json_object mode failed or returned empty, retry without it
+    if (!content) {
+      usedJsonMode = false;
+      console.log(`  → Retrying without response_format (appending JSON instruction)...`);
+
+      const retryPrompt = userMessage + `\n\nIMPORTANT: Respond ONLY with a valid JSON object. No markdown, no explanation, no extra text. Use this exact structure: {"bulletPoints":[],"tasks":[{"description":"","assignee":"","priority":"high|medium|low"}],"futureProspects":[],"marketingTopics":[]}`;
+
+      const response = await this.client.chat.completions.create({
+        model: this.model,
+        messages: [
+          { role: "system", content: SYSTEM_PROMPT },
+          { role: "user", content: retryPrompt },
+        ],
+        temperature: 0.1,
+        max_tokens: 4096,
+      });
+      content = response.choices[0]?.message?.content ?? null;
+    }
+
+    if (!content) {
+      throw new Error("Empty response from LLM API");
+    }
+
+    // Try to parse as JSON — handle both pure JSON and JSON in markdown code blocks
+    let parsed: MeetingSummary;
+    try {
+      parsed = JSON.parse(content) as MeetingSummary;
+    } catch {
+      // Maybe the model wrapped it in ```json ... ``` — try to extract
+      const jsonMatch = content.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+      if (jsonMatch) {
+        try {
+          parsed = JSON.parse(jsonMatch[1]) as MeetingSummary;
+        } catch {
+          const hint = usedJsonMode ? "" : " Your model may not support JSON mode.";
+          throw new Error(`Failed to parse LLM response as JSON.${hint} Response: ${content.slice(0, 200)}`);
+        }
+      } else {
+        const hint = usedJsonMode ? "" : " Your model may not support JSON mode.";
+        throw new Error(`Failed to parse LLM response as JSON.${hint} Response: ${content.slice(0, 200)}`);
+      }
+    }
+
+    return {
+      bulletPoints: parsed.bulletPoints || [],
+      tasks: parsed.tasks || [],
+      futureProspects: parsed.futureProspects || [],
+      marketingTopics: parsed.marketingTopics || [],
+    };
   }
 }
