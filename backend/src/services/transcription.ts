@@ -442,22 +442,36 @@ async function transcribeDeepgram(audioPath: string, language?: string): Promise
     const speakerLabels = new Map<number, string>();
     let speakerCounter = 0;
 
-    const speakerTranscript = utterances
-      .map((utt) => {
-        const txt = (utt.transcript || "").trim();
-        if (!txt) return null;
-        if (!speakerLabels.has(utt.speaker)) {
-          speakerLabels.set(utt.speaker, `Speaker ${speakerCounter}`);
-          speakerCounter++;
-        }
-        const label = speakerLabels.get(utt.speaker)!;
-        return `${label}: ${txt}`;
-      })
-      .filter(Boolean)
+    // Group consecutive utterances by speaker to avoid choppy output
+    // (Deepgram splits on pauses, so one thought can be many utterances)
+    const grouped: { label: string; texts: string[] }[] = [];
+
+    for (const utt of utterances) {
+      const txt = (utt.transcript || "").trim();
+      if (!txt) continue;
+
+      if (!speakerLabels.has(utt.speaker)) {
+        speakerLabels.set(utt.speaker, `Speaker ${speakerCounter}`);
+        speakerCounter++;
+      }
+      const label = speakerLabels.get(utt.speaker)!;
+
+      const last = grouped[grouped.length - 1];
+      if (last && last.label === label) {
+        // Same speaker — append to existing block
+        last.texts.push(txt);
+      } else {
+        // New speaker — start a new block
+        grouped.push({ label, texts: [txt] });
+      }
+    }
+
+    const speakerTranscript = grouped
+      .map((g) => `${g.label}: ${g.texts.join(" ")}`)
       .join("\n\n");
 
     if (speakerTranscript) {
-      console.log(`  → Deepgram: ${utterances.length} utterances, ${speakerCounter} speakers detected`);
+      console.log(`  → Deepgram: ${utterances.length} utterances → ${grouped.length} speaker blocks, ${speakerCounter} speakers detected`);
       return speakerTranscript;
     }
   }
