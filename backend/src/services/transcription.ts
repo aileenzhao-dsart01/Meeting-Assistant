@@ -120,13 +120,19 @@ export function normalizeAudio(audioPath: string): string {
   const target = config.audioNormalization.targetLoudness;
   const gainNeeded = Math.round(target - volume.meanVolume);
 
+  // For very quiet recordings (< -25 dB): over-boost to compensate for
+  // energy loss from the band-pass filter. Otherwise use standard gain.
+  const effectiveGain = volume.meanVolume < -25
+    ? Math.min(Math.max(Math.round(gainNeeded * 1.3), 20), 30)
+    : Math.min(Math.max(gainNeeded, 2), 30);
+
   console.log(
     `  → Audio: mean ${volume.meanVolume} dB, max ${volume.maxVolume} dB, ` +
-    `target ${target} dB (gain: +${Math.max(0, gainNeeded)} dB)`
+    `target ${target} dB (gain: +${effectiveGain} dB, raw: +${Math.max(0, gainNeeded)} dB)`
   );
 
   // Only skip if level is adequate AND clarity mode is at minimum
-  if (gainNeeded <= 1 && config.audioNormalization.clarityMode === "basic") {
+  if (effectiveGain <= 1 && config.audioNormalization.clarityMode === "basic") {
     console.log(`  → Volume OK, no normalization needed`);
     return audioPath;
   }
@@ -139,11 +145,10 @@ export function normalizeAudio(audioPath: string): string {
     counter++;
   }
 
-  // Audio enhancement — aggressive speech isolation
-  // Tighter band-pass (250-3600Hz) removes more noise without voice distortion.
-  // dynaudnorm normalizes dynamic range so quiet speech becomes audible.
-  // Boost voice clarity at 2kHz where consonant definition lives.
-  // No noise reduction (distorts voice). No noise gate (cuts quiet speech).
+  // Audio enhancement — aggressive speech isolation + max volume gain
+  // Tight band-pass (250-3600Hz) removes noise without voice distortion.
+  // Broad EQ boost at 2kHz for consonant clarity.
+  // No noise reduction, no dynaudnorm, no gate — pure filter + max gain.
   console.log(`  → Applying audio enhancement (mode: ${config.audioNormalization.clarityMode})...`);
 
   const mode = config.audioNormalization.clarityMode;
@@ -158,31 +163,30 @@ export function normalizeAudio(audioPath: string): string {
           "highpass=f=60",
           "lowpass=f=7500",
         ].join(",");
-        if (gainNeeded > 1) filterChain += `,volume=${gainNeeded}dB`;
+        if (effectiveGain > 1) filterChain += `,volume=${effectiveGain}dB`;
         break;
 
       case "speech":
       default:
-        // Aggressive speech isolation: tight band-pass + clarity EQ + dynamic normalization
+        // Max voice clarity: tight band-pass + speech EQ + aggressive gain
+        // No dynaudnorm (reduces volume) — just clean filter + boost to max
         filterChain = [
-          "highpass=f=250",               // aggressively cut room rumble, HVAC
-          "lowpass=f=3600",               // aggressively cut hiss, kids, high noise
-          "equalizer=f=2000:t=h:w=1000:g=10", // broad boost of speech clarity range
-          "dynaudnorm=f=200",             // normalize volume without clipping
+          "highpass=f=250",               // cut rumble
+          "lowpass=f=3600",               // cut noise
+          "equalizer=f=2000:t=h:w=1000:g=10", // boost speech clarity
         ].join(",");
-        if (gainNeeded > 1) filterChain += `,volume=${Math.min(Math.max(gainNeeded, 2), 24)}dB`;
+        if (effectiveGain > 1) filterChain += `,volume=${effectiveGain}dB`;
         break;
 
       case "max":
-        // Speech band + compression for very uneven levels + dynamic normalization
+        // Speech band + compression for very uneven recording levels
         filterChain = [
           "highpass=f=250",
           "lowpass=f=3600",
           "equalizer=f=2000:t=h:w=1000:g=10",
-          "dynaudnorm=f=200",
           "acompressor=threshold=0.15:ratio=4:attack=5:release=150",
         ].join(",");
-        if (gainNeeded > 1) filterChain += `,volume=${Math.min(Math.max(gainNeeded, 2), 24)}dB`;
+        if (effectiveGain > 1) filterChain += `,volume=${effectiveGain}dB`;
         break;
     }
 
@@ -208,7 +212,7 @@ export function normalizeAudio(audioPath: string): string {
     if (mode !== "basic" && !fallbackOk) {
       try {
         const fbChain = "highpass=f=60,lowpass=f=7500" +
-          (gainNeeded > 1 ? `,volume=${gainNeeded}dB` : "");
+          (effectiveGain > 1 ? `,volume=${effectiveGain}dB` : "");
         execSync(
           `${FFMPEG_PATH} -i "${audioPath}" -af "${fbChain}" -c:a pcm_s16le -y "${normalizedPath}" 2>&1`,
           { timeout: 300000, encoding: "utf-8" }
@@ -221,11 +225,11 @@ export function normalizeAudio(audioPath: string): string {
     }
 
     // Volume gain only
-    if (!fallbackOk && gainNeeded > 1) {
-      console.log(`  → Fallback: volume gain (${gainNeeded} dB)...`);
+    if (!fallbackOk && effectiveGain > 1) {
+      console.log(`  → Fallback: volume gain (${effectiveGain} dB)...`);
       try {
         execSync(
-          `${FFMPEG_PATH} -i "${audioPath}" -af "volume=${gainNeeded}dB" -c:a pcm_s16le -y "${normalizedPath}" 2>&1`,
+          `${FFMPEG_PATH} -i "${audioPath}" -af "volume=${effectiveGain}dB" -c:a pcm_s16le -y "${normalizedPath}" 2>&1`,
           { timeout: 300000, encoding: "utf-8" }
         );
         if (fs.statSync(normalizedPath).size > 0) fallbackOk = true;
