@@ -260,8 +260,25 @@ meetingRoutes.post(
       // Save to the configured storage provider (local disk or Supabase)
       const storage = getStorageProvider();
       const mimeType = getMimeType(filename);
-      const data = fs.readFileSync(tmpPath);
-      await storage.save(filename, data, mimeType);
+
+      // Enhance audio BEFORE storing — ensures replay is also clear, not just transcription
+      let savedFilename = filename;
+      let enhancedData: Buffer;
+      try {
+        const { normalizeAudio } = await import("../services/transcription");
+        const normalizedPath = normalizeAudio(tmpPath);
+        enhancedData = fs.readFileSync(normalizedPath);
+        // Use .wav extension for enhanced file (browsers play WAV universally)
+        savedFilename = filename.replace(/\.[^.]+$/, ".wav");
+        if (normalizedPath !== tmpPath && fs.existsSync(normalizedPath)) {
+          try { fs.unlinkSync(normalizedPath); } catch { /* ignore */ }
+        }
+      } catch {
+        enhancedData = fs.readFileSync(tmpPath);
+      }
+
+      const savedMimeType = getMimeType(savedFilename);
+      await storage.save(savedFilename, enhancedData, savedMimeType);
 
       // Clean up temp file
       try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
@@ -269,7 +286,7 @@ meetingRoutes.post(
       const updated = await prisma.meeting.update({
         where: { id: String(req.params.id) },
         data: {
-          recordingUrl: filename,
+          recordingUrl: savedFilename,
           status: "uploading",
         },
       });

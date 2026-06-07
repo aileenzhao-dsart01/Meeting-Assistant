@@ -106,7 +106,7 @@ function isFFmpegAvailable(): boolean {
  * @param audioPath - Original audio file path
  * @returns Path to the normalized audio file (caller must clean up)
  */
-function normalizeAudio(audioPath: string): string {
+export function normalizeAudio(audioPath: string): string {
   if (!config.audioNormalization.enabled) {
     return audioPath;
   }
