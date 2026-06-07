@@ -141,12 +141,32 @@ meetingRoutes.get("/:id", async (req: Request, res: Response) => {
   }
 });
 
-// ---------- RENAME meeting ----------
+// ---------- UPDATE meeting ----------
 meetingRoutes.patch("/:id", async (req: Request, res: Response) => {
   try {
-    const { title } = req.body;
-    if (!title || typeof title !== "string" || !title.trim()) {
-      res.status(400).json({ success: false, error: "Invalid title" });
+    const { title, duration } = req.body;
+
+    // Allow updating fields individually — don't require title
+    const data: Record<string, unknown> = {};
+
+    if (title !== undefined) {
+      if (typeof title !== "string" || !title.trim()) {
+        res.status(400).json({ success: false, error: "Invalid title" });
+        return;
+      }
+      data.title = title.trim();
+    }
+
+    if (duration !== undefined) {
+      if (typeof duration !== "number" || duration < 0) {
+        res.status(400).json({ success: false, error: "Invalid duration" });
+        return;
+      }
+      data.duration = Math.round(duration);
+    }
+
+    if (Object.keys(data).length === 0) {
+      res.status(400).json({ success: false, error: "No valid fields to update (title or duration)" });
       return;
     }
 
@@ -160,7 +180,7 @@ meetingRoutes.patch("/:id", async (req: Request, res: Response) => {
 
     const updated = await prisma.meeting.update({
       where: { id: String(req.params.id) },
-      data: { title: title.trim() },
+      data,
     });
 
     res.json({
@@ -255,7 +275,9 @@ meetingRoutes.post(
 
       res.json({ success: true, data: updated });
     } catch (err) {
-      res.status(500).json({ success: false, error: "Failed to upload audio" });
+      const message = err instanceof Error ? err.message : "Unknown error";
+      console.error(`✗ Audio upload failed for meeting ${String(req.params.id)}:`, message);
+      res.status(500).json({ success: false, error: `Failed to upload audio: ${message}` });
     }
   }
 );
@@ -301,7 +323,9 @@ meetingRoutes.get("/:id/audio", async (req: Request, res: Response) => {
     res.setHeader("Content-Type", mimeType);
     res.send(data);
   } catch (err) {
-    res.status(500).json({ success: false, error: "Failed to download audio" });
+    const message = err instanceof Error ? err.message : "Unknown error";
+    console.error(`✗ Audio download failed for meeting ${String(req.params.id)}:`, message);
+    res.status(500).json({ success: false, error: `Failed to download audio: ${message}` });
   }
 });
 
@@ -322,7 +346,9 @@ meetingRoutes.post("/:id/process", async (req: Request, res: Response) => {
 
     // Verify the audio file exists in storage
     const storage = getStorageProvider();
-    if (!(await storage.exists(meeting.recordingUrl))) {
+    console.log(`  → Checking storage for: ${meeting.recordingUrl} (provider: ${storage.name})`);
+    const fileExists = await storage.exists(meeting.recordingUrl);
+    if (!fileExists) {
       res.status(400).json({
         success: false,
         error: `Audio file "${meeting.recordingUrl}" not found in storage. The upload may have failed. Please upload again.`,
@@ -357,7 +383,9 @@ meetingRoutes.post("/:id/process", async (req: Request, res: Response) => {
       data: { message: "Processing started", meetingId: meeting.id },
     });
   } catch (err) {
-    res.status(500).json({ success: false, error: "Failed to start processing" });
+    const message = err instanceof Error ? err.message : "Unknown error";
+    console.error(`✗ Failed to start processing for meeting ${String(req.params.id)}:`, message);
+    res.status(500).json({ success: false, error: `Failed to start processing: ${message}` });
   }
 });
 
@@ -406,7 +434,6 @@ async function processMeeting(meetingId: string) {
         bulletPoints: JSON.stringify(summary.bulletPoints),
         topics: JSON.stringify(summary.marketingTopics),
         status: "complete",
-        duration: 0, // TODO: derive from audio file
       },
     });
 

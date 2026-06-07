@@ -24,7 +24,7 @@ export class SupabaseStorageProvider implements StorageProvider {
   private get headers(): Record<string, string> {
     return {
       Authorization: `Bearer ${config.storage.supabase.serviceRoleKey}`,
-      apiKey: config.storage.supabase.serviceRoleKey,
+      apikey: config.storage.supabase.serviceRoleKey,
     };
   }
 
