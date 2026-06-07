@@ -132,69 +132,56 @@ function normalizeAudio(audioPath: string): string {
   }
 
   const ext = path.extname(audioPath) || ".wav";
-  let normalizedPath = audioPath.replace(/(\.\w+)$/, "_normalized$1");
+  let normalizedPath = audioPath.replace(/(\.\w+)$/, "_normalized.wav");
   let counter = 1;
   while (fs.existsSync(normalizedPath)) {
-    normalizedPath = audioPath.replace(/(\.\w+)$/, `_normalized_${counter}$1`);
+    normalizedPath = audioPath.replace(/(\.\w+)$/, `_normalized_${counter}.wav`);
     counter++;
   }
 
-  // Build the filter chain for meeting room audio
-  // Each filter addresses a specific room recording issue
-  const filters: string[] = [];
+  // Audio enhancement — simple and reliable
+  // Only the most impactful filters: high-pass (rumble removal) + optional compression
+  console.log(`  → Applying audio enhancement...`);
 
-  // 1. High-pass filter — removes low-frequency room rumble (HVAC, traffic, hum)
-  //    80 Hz cuts room rumble without losing male speech (lowest male fundamental ~85 Hz)
-  filters.push("highpass=f=80");
-
-  // 2. Low-pass filter — removes high-frequency noise above speech range
-  filters.push("lowpass=f=7500");
-
-  // 3. Noise reduction — ffmpeg's afftdn filter adaptively reduces background noise
-  //    Works well for consistent room noise (fans, projectors, AC hum)
-  filters.push("afftdn=nf=-25");
-
-  // 4. Speech-focused equalization — boost clarity frequencies, reduce muddy ones
-  //    - Slight cut at 200-300 Hz (reduces "boxy" room sound)
-  //    - Boost at 2-4 kHz (speech intelligibility / consonant clarity)
-  //    - Gentle high shelf at 6 kHz (adds air/sparkle for distant mics)
-  filters.push("equalizer=f=240:t=h:w=200:g=-2,equalizer=f=2500:t=h:w=800:g=4,equalizer=f=6000:t=h:w=2000:g=2");
-
-  // 5. Dynamic range compression — evens out quiet vs loud speakers
-  //    - Low threshold catches distant/quiet speakers
-  //    - 4:1 ratio prevents loud speakers from clipping
-  //    - Fast attack catches sudden loud noises, slow release sounds natural
-  //    - Only applied if compression is enabled
-  if (config.audioNormalization.enableCompression || gainNeeded > 3) {
-    filters.push("acompressor=threshold=0.15:ratio=4:attack=20:release=250:makeup=true");
-  }
-
-  // 6. Loudness normalization — bring overall level to broadcast standard
-  //    Uses EBU R128 loudnorm for consistent perceived loudness
-  filters.push(`loudnorm=I=${target}:LRA=7:TP=-1.5`);
-
-  const filterChain = filters.join(",");
-
-  const cmd =
-    `${FFMPEG_PATH} -i "${audioPath}" -af "${filterChain}" ` +
-    `-c:a pcm_s16le -y "${normalizedPath}" 2>&1`;
-
-  console.log(`  → Applying meeting room audio enhancement...`);
+  let enhancementFailed = false;
 
   try {
-    execSync(cmd, { timeout: 600000, encoding: "utf-8" }); // 10 min for long files
+    // High-pass filter removes room rumble; always beneficial for meeting recordings
+    let filterChain = "highpass=f=80";
+
+    // Dynamic range compression evens out quiet vs loud speakers
+    if (config.audioNormalization.enableCompression || gainNeeded > 3) {
+      filterChain += ",acompressor=threshold=0.2:ratio=4:attack=20:release=250";
+    }
+
+    execSync(
+      `${FFMPEG_PATH} -i "${audioPath}" -af "${filterChain}" -c:a pcm_s16le -y "${normalizedPath}" 2>&1`,
+      { timeout: 600000, encoding: "utf-8" }
+    );
+
+    const normSize = fs.statSync(normalizedPath).size;
+    if (normSize === 0) throw new Error("Normalized file is empty");
+    console.log(`  → Audio enhanced (${(normSize / 1024 / 1024).toFixed(1)} MB)`);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`  ⚠ Meeting room enhancement failed (${msg.substring(0, 100)}), trying simple gain...`);
+    console.warn(`  ⚠ Enhancement failed (${msg.substring(0, 80)}), trying volume gain...`);
+    enhancementFailed = true;
+  }
 
-    // Fallback: simple volume boost
-    const fallbackCmd =
-      `${FFMPEG_PATH} -i "${audioPath}" -af "volume=${Math.max(2, gainNeeded)}dB" ` +
-      `-y "${normalizedPath}" 2>&1`;
-    try {
-      execSync(fallbackCmd, { timeout: 300000, encoding: "utf-8" });
-    } catch {
-      console.warn(`  ⚠ Simple gain also failed, using original audio`);
+  // Fallback: simple volume gain if enhancement failed and gain is needed
+  if (enhancementFailed || !fs.existsSync(normalizedPath) || fs.statSync(normalizedPath).size === 0) {
+    if (gainNeeded > 1) {
+      console.log(`  → Applying volume gain (${gainNeeded} dB)...`);
+      try {
+        execSync(
+          `${FFMPEG_PATH} -i "${audioPath}" -af "volume=${gainNeeded}dB" -c:a pcm_s16le -y "${normalizedPath}" 2>&1`,
+          { timeout: 300000, encoding: "utf-8" }
+        );
+      } catch {
+        console.warn(`  ⚠ Volume gain failed, using original audio`);
+        return audioPath;
+      }
+    } else {
       return audioPath;
     }
   }
