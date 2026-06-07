@@ -139,8 +139,9 @@ function normalizeAudio(audioPath: string): string {
     counter++;
   }
 
-  // Audio enhancement — speech clarity pipeline
-  // Build the filter chain based on selected clarity mode
+  // Audio enhancement — speech frequency band enhancement
+  // Strategy: don't boost everything. Only boost frequencies where speech lives.
+  // Cut everything outside 200-4500Hz to remove noise without distorting voice.
   console.log(`  → Applying audio enhancement (mode: ${config.audioNormalization.clarityMode})...`);
 
   const mode = config.audioNormalization.clarityMode;
@@ -150,38 +151,36 @@ function normalizeAudio(audioPath: string): string {
   try {
     switch (mode) {
       case "basic":
-        // Rumble removal + low-pass noise + volume boost
-        filterChain = "highpass=f=80,lowpass=f=7500";
+        // Light bump: remove subsonic rumble + gentle volume
+        filterChain = [
+          "highpass=f=60",
+          "lowpass=f=7500",
+        ].join(",");
         if (gainNeeded > 1) filterChain += `,volume=${gainNeeded}dB`;
         break;
 
       case "speech":
-        // Basic + adaptive noise reduction + speech clarity EQ + de-esser
+      default:
+        // Smart: band-pass only speech frequencies, cut room resonance, boost clarity
         filterChain = [
-          "highpass=f=80",
-          "lowpass=f=7500",
-          "afftdn=nf=-25",             // adaptive noise reduction
-          "deesser=i=0.5",              // reduce sibilance
-          "equalizer=f=240:t=h:w=200:g=-4",   // cut boxy room resonance
-          "equalizer=f=2500:t=h:w=800:g=6",   // boost speech clarity (consonants)
-          "equalizer=f=6000:t=h:w=2000:g=3",  // add presence/air
+          "highpass=f=200",               // cut all rumble, AC, traffic below voice
+          "lowpass=f=4500",               // cut all hiss, kids, noise above voice
+          "equalizer=f=150:t=h:w=100:g=-6", // cut boxy room sound
+          "equalizer=f=2500:t=h:w=800:g=6", // boost speech consonants for clarity
         ].join(",");
+        if (gainNeeded > 1) filterChain += `,volume=${Math.min(gainNeeded, 6)}dB`; // cap at 6dB
         break;
 
       case "max":
-      default:
-        // Speech + compression + dynamic normalization = loudest, clearest
+        // Speech band + gentle compression for very uneven levels
         filterChain = [
-          "highpass=f=80",
-          "lowpass=f=7500",
-          "afftdn=nf=-25",
-          "deesser=i=0.5",
-          "equalizer=f=240:t=h:w=200:g=-4",
+          "highpass=f=200",
+          "lowpass=f=4500",
+          "equalizer=f=150:t=h:w=100:g=-6",
           "equalizer=f=2500:t=h:w=800:g=6",
-          "equalizer=f=6000:t=h:w=2000:g=3",
-          "acompressor=threshold=0.1:ratio=5:attack=10:release=200", // even out loud/quiet
-          "dynaudnorm=p=0.9:m=100",      // dynamic normalization (boost quiet parts)
+          "acompressor=threshold=0.2:ratio=3:attack=5:release=100", // gentle, no makeup
         ].join(",");
+        if (gainNeeded > 1) filterChain += `,volume=${Math.min(gainNeeded, 6)}dB`;
         break;
     }
 
@@ -195,52 +194,45 @@ function normalizeAudio(audioPath: string): string {
     console.log(`  → Audio enhanced (${(normSize / 1024 / 1024).toFixed(1)} MB)`);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`  ⚠ ${mode} enhancement failed (${msg.substring(0, 80)}), trying speech mode...`);
+    console.warn(`  ⚠ ${mode} enhancement failed (${msg.substring(0, 80)}), trying basic...`);
     enhancementFailed = true;
   }
 
-  // Fallback chain: try simpler modes, then basic gain, then original
+  // Fallback: simpler modes
   if (enhancementFailed || !fs.existsSync(normalizedPath) || fs.statSync(normalizedPath).size === 0) {
-    // Try "speech" mode as fallback
-    if (mode === "max") {
+    let fallbackOk = false;
+
+    // Try basic mode
+    if (mode !== "basic" && !fallbackOk) {
       try {
-        const fallbackChain = [
-          "highpass=f=80",
-          "lowpass=f=7500",
-          "afftdn=nf=-25",
-          "equalizer=f=240:t=h:w=200:g=-3",
-          "equalizer=f=2500:t=h:w=800:g=6",
-        ].join(",");
+        const fbChain = "highpass=f=60,lowpass=f=7500" +
+          (gainNeeded > 1 ? `,volume=${gainNeeded}dB` : "");
         execSync(
-          `${FFMPEG_PATH} -i "${audioPath}" -af "${fallbackChain}" -c:a pcm_s16le -y "${normalizedPath}" 2>&1`,
+          `${FFMPEG_PATH} -i "${audioPath}" -af "${fbChain}" -c:a pcm_s16le -y "${normalizedPath}" 2>&1`,
           { timeout: 300000, encoding: "utf-8" }
         );
-        const fbSize = fs.statSync(normalizedPath).size;
-        if (fbSize > 0) {
-          console.log(`  → Fallback to speech mode OK (${(fbSize / 1024 / 1024).toFixed(1)} MB)`);
-          enhancementFailed = false;
+        if (fs.statSync(normalizedPath).size > 0) {
+          console.log(`  → Fallback to basic mode OK`);
+          fallbackOk = true;
         }
-      } catch {
-        // continue to simple gain
-      }
+      } catch { /* next fallback */ }
     }
 
-    // Final fallback: simple volume gain
-    if (enhancementFailed || !fs.existsSync(normalizedPath) || fs.statSync(normalizedPath).size === 0) {
-      if (gainNeeded > 1) {
-        console.log(`  → Fallback: applying volume gain (${gainNeeded} dB)...`);
-        try {
-          execSync(
-            `${FFMPEG_PATH} -i "${audioPath}" -af "volume=${gainNeeded}dB" -c:a pcm_s16le -y "${normalizedPath}" 2>&1`,
-            { timeout: 300000, encoding: "utf-8" }
-          );
-        } catch {
-          console.warn(`  ⚠ All enhancement failed, using original audio`);
-          return audioPath;
-        }
-      } else {
-        return audioPath;
-      }
+    // Volume gain only
+    if (!fallbackOk && gainNeeded > 1) {
+      console.log(`  → Fallback: volume gain (${gainNeeded} dB)...`);
+      try {
+        execSync(
+          `${FFMPEG_PATH} -i "${audioPath}" -af "volume=${gainNeeded}dB" -c:a pcm_s16le -y "${normalizedPath}" 2>&1`,
+          { timeout: 300000, encoding: "utf-8" }
+        );
+        if (fs.statSync(normalizedPath).size > 0) fallbackOk = true;
+      } catch { /* skip */ }
+    }
+
+    if (!fallbackOk) {
+      console.warn(`  ⚠ All enhancement failed, using original audio`);
+      return audioPath;
     }
   }
 
