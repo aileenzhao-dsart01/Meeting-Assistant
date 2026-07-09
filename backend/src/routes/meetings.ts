@@ -223,7 +223,7 @@ meetingRoutes.post("/", async (req: Request, res: Response) => {
 meetingRoutes.get("/:mid", async (req: Request, res: Response) => {
   try {
     const { meeting, access } = await resolveMeetingAccess(
-      req.params.mid,
+      String(req.params.mid),
       req.workspace!.id,
     );
     res.json({ success: true, data: formatMeeting(meeting, access) });
@@ -238,7 +238,7 @@ meetingRoutes.get("/:mid", async (req: Request, res: Response) => {
 meetingRoutes.patch("/:mid", async (req: Request, res: Response) => {
   try {
     const { meeting, access } = await resolveMeetingAccess(
-      req.params.mid,
+      String(req.params.mid),
       req.workspace!.id,
     );
     assertOwnAccess(access);
@@ -268,7 +268,7 @@ meetingRoutes.patch("/:mid", async (req: Request, res: Response) => {
     }
 
     const updated = await prisma.meeting.update({
-      where: { id: req.params.mid },
+      where: { id: String(req.params.mid) },
       data,
       include: { tasks: { orderBy: { createdAt: "desc" as const } } },
     });
@@ -285,7 +285,7 @@ meetingRoutes.patch("/:mid", async (req: Request, res: Response) => {
 meetingRoutes.delete("/:mid", async (req: Request, res: Response) => {
   try {
     const { meeting, access } = await resolveMeetingAccess(
-      req.params.mid,
+      String(req.params.mid),
       req.workspace!.id,
     );
     assertOwnAccess(access);
@@ -295,7 +295,7 @@ meetingRoutes.delete("/:mid", async (req: Request, res: Response) => {
       await storage.delete(meeting.recordingUrl);
     }
 
-    await prisma.meeting.delete({ where: { id: req.params.mid } });
+    await prisma.meeting.delete({ where: { id: String(req.params.mid) } });
     res.json({ success: true, data: { message: "Meeting deleted" } });
   } catch (err) {
     if (err instanceof AppError) throw err;
@@ -315,7 +315,7 @@ meetingRoutes.post(
   async (req: Request, res: Response) => {
     try {
       const { meeting, access } = await resolveMeetingAccess(
-        req.params.mid,
+        String(req.params.mid),
         req.workspace!.id,
       );
       assertOwnAccess(access);
@@ -364,14 +364,14 @@ meetingRoutes.post(
       try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
 
       const updated = await prisma.meeting.update({
-        where: { id: req.params.mid },
+        where: { id: String(req.params.mid) },
         data: { recordingUrl: savedFilename, status: "uploading" },
       });
 
       res.json({ success: true, data: { ...updated, access: "own" } });
     } catch (err) {
       const message = err instanceof Error ? err.message : "Unknown error";
-      console.error(`✗ Audio upload failed for meeting ${req.params.mid}:`, message);
+      console.error(`✗ Audio upload failed for meeting ${String(req.params.mid)}:`, message);
       res.status(500).json({ success: false, error: `Failed to upload audio: ${message}` });
     }
   },
@@ -381,7 +381,7 @@ meetingRoutes.post(
 meetingRoutes.get("/:mid/audio", async (req: Request, res: Response) => {
   try {
     const { meeting, access } = await resolveMeetingAccess(
-      req.params.mid,
+      String(req.params.mid),
       req.workspace!.id,
     );
 
@@ -402,7 +402,7 @@ meetingRoutes.get("/:mid/audio", async (req: Request, res: Response) => {
     res.send(data);
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
-    console.error(`✗ Audio download failed for meeting ${req.params.mid}:`, message);
+    console.error(`✗ Audio download failed for meeting ${String(req.params.mid)}:`, message);
     res.status(500).json({ success: false, error: `Failed to download audio: ${message}` });
   }
 });
@@ -415,7 +415,7 @@ meetingRoutes.get("/:mid/audio", async (req: Request, res: Response) => {
 meetingRoutes.post("/:mid/process", async (req: Request, res: Response) => {
   try {
     const { meeting, access } = await resolveMeetingAccess(
-      req.params.mid,
+      String(req.params.mid),
       req.workspace!.id,
     );
     assertOwnAccess(access);
@@ -470,7 +470,7 @@ meetingRoutes.post("/:mid/process", async (req: Request, res: Response) => {
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
-    console.error(`✗ Failed to start processing for meeting ${req.params.mid}:`, message);
+    console.error(`✗ Failed to start processing for meeting ${String(req.params.mid)}:`, message);
     res.status(500).json({ success: false, error: `Failed to start processing: ${message}` });
   }
 });
@@ -482,7 +482,7 @@ meetingRoutes.post("/:mid/process", async (req: Request, res: Response) => {
 // ---------- GET transcript ----------
 meetingRoutes.get("/:mid/transcript", async (req: Request, res: Response) => {
   try {
-    const { meeting } = await resolveMeetingAccess(req.params.mid, req.workspace!.id);
+    const { meeting } = await resolveMeetingAccess(String(req.params.mid), req.workspace!.id);
     res.json({
       success: true,
       data: { transcript: meeting.transcript, status: meeting.status },
@@ -496,7 +496,7 @@ meetingRoutes.get("/:mid/transcript", async (req: Request, res: Response) => {
 // ---------- GET summary ----------
 meetingRoutes.get("/:mid/summary", async (req: Request, res: Response) => {
   try {
-    const { meeting } = await resolveMeetingAccess(req.params.mid, req.workspace!.id);
+    const { meeting } = await resolveMeetingAccess(String(req.params.mid), req.workspace!.id);
     res.json({
       success: true,
       data: {
@@ -519,7 +519,7 @@ meetingRoutes.get("/:mid/summary", async (req: Request, res: Response) => {
 // ---------- LIST tasks ----------
 meetingRoutes.get("/:mid/tasks", async (req: Request, res: Response) => {
   try {
-    const { meeting } = await resolveMeetingAccess(req.params.mid, req.workspace!.id);
+    const { meeting } = await resolveMeetingAccess(String(req.params.mid), req.workspace!.id);
     const tasks = await prisma.task.findMany({
       where: { meetingId: meeting.id },
       orderBy: [{ priority: "asc" as const }, { createdAt: "desc" as const }],
@@ -535,7 +535,7 @@ meetingRoutes.get("/:mid/tasks", async (req: Request, res: Response) => {
 meetingRoutes.patch("/:mid/tasks/:tid", async (req: Request, res: Response) => {
   try {
     // Verify meeting access (own required for task mutation)
-    const { access } = await resolveMeetingAccess(req.params.mid, req.workspace!.id);
+    const { access } = await resolveMeetingAccess(String(req.params.mid), req.workspace!.id);
     assertOwnAccess(access);
 
     const { status, assignee, priority } = req.body;
@@ -549,14 +549,14 @@ meetingRoutes.patch("/:mid/tasks/:tid", async (req: Request, res: Response) => {
       return;
     }
 
-    const task = await prisma.task.findUnique({ where: { id: req.params.tid } });
-    if (!task || task.meetingId !== req.params.mid) {
+    const task = await prisma.task.findUnique({ where: { id: String(req.params.tid) } });
+    if (!task || task.meetingId !== String(req.params.mid)) {
       res.status(404).json({ success: false, error: "Task not found" });
       return;
     }
 
     const updated = await prisma.task.update({
-      where: { id: req.params.tid },
+      where: { id: String(req.params.tid) },
       data,
     });
 
@@ -575,7 +575,7 @@ meetingRoutes.patch("/:mid/tasks/:tid", async (req: Request, res: Response) => {
 // ---------- GET shared-with (list workspaces this meeting is shared with) ----------
 meetingRoutes.get("/:mid/shared-with", async (req: Request, res: Response) => {
   try {
-    const { meeting, access } = await resolveMeetingAccess(req.params.mid, req.workspace!.id);
+    const { meeting, access } = await resolveMeetingAccess(String(req.params.mid), req.workspace!.id);
     assertOwnAccess(access);
 
     const shared = await prisma.sharedMeeting.findMany({
@@ -606,7 +606,7 @@ meetingRoutes.post(
   requireWorkspaceAdmin,    // re-assert admin on the current workspace
   async (req: Request, res: Response) => {
     try {
-      const { meeting, access } = await resolveMeetingAccess(req.params.mid, req.workspace!.id);
+      const { meeting, access } = await resolveMeetingAccess(String(req.params.mid), req.workspace!.id);
       assertOwnAccess(access);
 
       const { targetWorkspaceId } = req.body;
@@ -669,7 +669,7 @@ meetingRoutes.delete(
   requireWorkspaceAdmin,
   async (req: Request, res: Response) => {
     try {
-      const { meeting, access } = await resolveMeetingAccess(req.params.mid, req.workspace!.id);
+      const { meeting, access } = await resolveMeetingAccess(String(req.params.mid), req.workspace!.id);
       assertOwnAccess(access);
 
       const targetWorkspaceId = req.query.targetWorkspaceId as string;

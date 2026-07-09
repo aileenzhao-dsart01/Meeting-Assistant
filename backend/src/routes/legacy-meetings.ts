@@ -171,7 +171,7 @@ legacyMeetingRoutes.get("/:id", async (req: Request, res: Response) => {
     const wid = await defaultWorkspace(req.user!.id);
     const meeting = await prisma.meeting.findFirst({
       where: {
-        id: req.params.id,
+        id: String(req.params.id),
         OR: [
           { workspaceId: wid },
           { sharedTo: { some: { workspaceId: wid } } },
@@ -208,7 +208,7 @@ legacyMeetingRoutes.patch("/:id", async (req: Request, res: Response) => {
   try {
     const wid = await defaultWorkspace(req.user!.id);
     const meeting = await prisma.meeting.findFirst({
-      where: { id: req.params.id, workspaceId: wid },
+      where: { id: String(req.params.id), workspaceId: wid },
     });
     if (!meeting) {
       res.status(404).json({ success: false, error: "Meeting not found" });
@@ -237,7 +237,7 @@ legacyMeetingRoutes.patch("/:id", async (req: Request, res: Response) => {
     }
 
     const updated = await prisma.meeting.update({
-      where: { id: req.params.id },
+      where: { id: String(req.params.id) },
       data,
     });
     res.json({
@@ -261,7 +261,7 @@ legacyMeetingRoutes.delete("/:id", async (req: Request, res: Response) => {
   try {
     const wid = await defaultWorkspace(req.user!.id);
     const meeting = await prisma.meeting.findFirst({
-      where: { id: req.params.id, workspaceId: wid },
+      where: { id: String(req.params.id), workspaceId: wid },
     });
     if (!meeting) {
       res.status(404).json({ success: false, error: "Meeting not found" });
@@ -272,7 +272,7 @@ legacyMeetingRoutes.delete("/:id", async (req: Request, res: Response) => {
       const storage = getStorageProvider();
       await storage.delete(meeting.recordingUrl);
     }
-    await prisma.meeting.delete({ where: { id: req.params.id } });
+    await prisma.meeting.delete({ where: { id: String(req.params.id) } });
     res.json({ success: true, data: { message: "Meeting deleted" } });
   } catch (err) {
     if (err instanceof AppError) throw err;
@@ -285,7 +285,7 @@ legacyMeetingRoutes.post("/:id/audio", upload.single("audio"), async (req: Reque
   try {
     const wid = await defaultWorkspace(req.user!.id);
     const meeting = await prisma.meeting.findFirst({
-      where: { id: req.params.id, workspaceId: wid },
+      where: { id: String(req.params.id), workspaceId: wid },
     });
     if (!meeting) {
       res.status(404).json({ success: false, error: "Meeting not found" });
@@ -328,13 +328,13 @@ legacyMeetingRoutes.post("/:id/audio", upload.single("audio"), async (req: Reque
     try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
 
     const updated = await prisma.meeting.update({
-      where: { id: req.params.id },
+      where: { id: String(req.params.id) },
       data: { recordingUrl: savedFilename, status: "uploading" },
     });
     res.json({ success: true, data: updated });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
-    console.error(`✗ Audio upload failed for meeting ${req.params.id}:`, message);
+    console.error(`✗ Audio upload failed for meeting ${String(req.params.id)}:`, message);
     res.status(500).json({ success: false, error: `Failed to upload audio: ${message}` });
   }
 });
@@ -345,7 +345,7 @@ legacyMeetingRoutes.get("/:id/audio", async (req: Request, res: Response) => {
     const wid = await defaultWorkspace(req.user!.id);
     const meeting = await prisma.meeting.findFirst({
       where: {
-        id: req.params.id,
+        id: String(req.params.id),
         OR: [{ workspaceId: wid }, { sharedTo: { some: { workspaceId: wid } } }],
       },
     });
@@ -363,7 +363,7 @@ legacyMeetingRoutes.get("/:id/audio", async (req: Request, res: Response) => {
     res.send(data);
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
-    console.error(`✗ Audio download failed for meeting ${req.params.id}:`, message);
+    console.error(`✗ Audio download failed for meeting ${String(req.params.id)}:`, message);
     res.status(500).json({ success: false, error: `Failed to download audio: ${message}` });
   }
 });
@@ -373,7 +373,7 @@ legacyMeetingRoutes.post("/:id/process", async (req: Request, res: Response) => 
   try {
     const wid = await defaultWorkspace(req.user!.id);
     const meeting = await prisma.meeting.findFirst({
-      where: { id: req.params.id, workspaceId: wid },
+      where: { id: String(req.params.id), workspaceId: wid },
     });
     if (!meeting) {
       res.status(404).json({ success: false, error: "Meeting not found" });
@@ -454,7 +454,7 @@ legacyMeetingRoutes.post("/:id/process", async (req: Request, res: Response) => 
     res.status(202).json({ success: true, data: { message: "Processing started", meetingId: meeting.id } });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
-    console.error(`✗ Failed to start processing for meeting ${req.params.id}:`, message);
+    console.error(`✗ Failed to start processing for meeting ${String(req.params.id)}:`, message);
     res.status(500).json({ success: false, error: `Failed to start processing: ${message}` });
   }
 });
@@ -465,7 +465,7 @@ legacyMeetingRoutes.get("/:id/transcript", async (req: Request, res: Response) =
     const wid = await defaultWorkspace(req.user!.id);
     const meeting = await prisma.meeting.findFirst({
       where: {
-        id: req.params.id,
+        id: String(req.params.id),
         OR: [{ workspaceId: wid }, { sharedTo: { some: { workspaceId: wid } } }],
       },
     });
@@ -482,7 +482,7 @@ legacyMeetingRoutes.get("/:id/summary", async (req: Request, res: Response) => {
     const wid = await defaultWorkspace(req.user!.id);
     const meeting = await prisma.meeting.findFirst({
       where: {
-        id: req.params.id,
+        id: String(req.params.id),
         OR: [{ workspaceId: wid }, { sharedTo: { some: { workspaceId: wid } } }],
       },
     });
@@ -507,7 +507,7 @@ legacyMeetingRoutes.get("/:id/tasks", async (req: Request, res: Response) => {
     const wid = await defaultWorkspace(req.user!.id);
     const meeting = await prisma.meeting.findFirst({
       where: {
-        id: req.params.id,
+        id: String(req.params.id),
         OR: [{ workspaceId: wid }, { sharedTo: { some: { workspaceId: wid } } }],
       },
     });
@@ -527,14 +527,18 @@ legacyMeetingRoutes.patch("/tasks/:id", async (req: Request, res: Response) => {
   try {
     const userId = req.user!.id;
     const task = await prisma.task.findUnique({
-      where: { id: req.params.id },
-      include: { meeting: { include: { workspace: true } } },
+      where: { id: String(req.params.id) },
     });
     if (!task) { res.status(404).json({ success: false, error: "Task not found" }); return; }
 
     // Verify user is a member of the meeting's workspace
+    const meeting = await prisma.meeting.findUnique({
+      where: { id: task.meetingId },
+    });
+    if (!meeting) { res.status(404).json({ success: false, error: "Meeting not found" }); return; }
+
     const membership = await prisma.workspaceMember.findUnique({
-      where: { userId_workspaceId: { userId, workspaceId: task.meeting.workspaceId } },
+      where: { userId_workspaceId: { userId, workspaceId: String(meeting.workspaceId) } },
     });
     if (!membership) {
       res.status(403).json({ success: false, error: "Access denied" });
@@ -548,7 +552,7 @@ legacyMeetingRoutes.patch("/tasks/:id", async (req: Request, res: Response) => {
     if (priority !== undefined) data.priority = priority;
 
     const updated = await prisma.task.update({
-      where: { id: req.params.id },
+      where: { id: String(req.params.id) },
       data,
     });
     res.json({ success: true, data: updated });

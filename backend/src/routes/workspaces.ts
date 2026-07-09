@@ -127,7 +127,7 @@ workspaceRoutes.get(
   async (req: Request, res: Response) => {
     try {
       const workspace = await prisma.workspace.findUnique({
-        where: { id: req.params.wid },
+        where: { id: String(req.params.wid) },
         include: { _count: { select: { members: true } } },
       });
 
@@ -159,7 +159,7 @@ workspaceRoutes.patch(
       }
 
       const updated = await prisma.workspace.update({
-        where: { id: req.params.wid },
+        where: { id: String(req.params.wid) },
         data: { name: name.trim() },
         include: { _count: { select: { members: true } } },
       });
@@ -183,7 +183,7 @@ workspaceRoutes.delete(
   requireWorkspaceOwner,
   async (req: Request, res: Response) => {
     try {
-      await prisma.workspace.delete({ where: { id: req.params.wid } });
+      await prisma.workspace.delete({ where: { id: String(req.params.wid) } });
       res.json({ success: true, data: { message: "Workspace deleted" } });
     } catch (err) {
       if (err instanceof AppError) throw err;
@@ -200,7 +200,7 @@ workspaceRoutes.get(
   async (req: Request, res: Response) => {
     try {
       const members = await prisma.workspaceMember.findMany({
-        where: { workspaceId: req.params.wid },
+        where: { workspaceId: String(req.params.wid) },
         include: {
           user: { select: { id: true, email: true, name: true } },
         },
@@ -243,7 +243,7 @@ workspaceRoutes.post(
 
       // Check if already a member
       const existing = await prisma.workspaceMember.findUnique({
-        where: { userId_workspaceId: { userId: user.id, workspaceId: req.params.wid } },
+        where: { userId_workspaceId: { userId: user.id, workspaceId: String(req.params.wid) } },
       });
       if (existing) {
         res.status(409).json({ success: false, error: "User is already a member of this workspace" });
@@ -254,7 +254,7 @@ workspaceRoutes.post(
       const member = await prisma.workspaceMember.create({
         data: {
           userId: user.id,
-          workspaceId: req.params.wid,
+          workspaceId: String(req.params.wid),
           role: memberRole,
         },
         include: {
@@ -291,11 +291,11 @@ workspaceRoutes.patch(
       // Don't allow changing the last owner's role
       if (role !== "owner") {
         const ownerCount = await prisma.workspaceMember.count({
-          where: { workspaceId: req.params.wid, role: "owner" },
+          where: { workspaceId: String(req.params.wid), role: "owner" },
         });
         if (ownerCount <= 1) {
           const target = await prisma.workspaceMember.findUnique({
-            where: { userId_workspaceId: { userId: req.params.userId, workspaceId: req.params.wid } },
+            where: { userId_workspaceId: { userId: String(req.params.userId), workspaceId: String(req.params.wid) } },
           });
           if (target?.role === "owner") {
             res.status(400).json({ success: false, error: "Cannot change the last owner's role" });
@@ -305,7 +305,7 @@ workspaceRoutes.patch(
       }
 
       const updated = await prisma.workspaceMember.update({
-        where: { userId_workspaceId: { userId: req.params.userId, workspaceId: req.params.wid } },
+        where: { userId_workspaceId: { userId: String(req.params.userId), workspaceId: String(req.params.wid) } },
         data: { role },
         include: {
           user: { select: { id: true, email: true, name: true } },
@@ -330,7 +330,7 @@ workspaceRoutes.delete(
   async (req: Request, res: Response) => {
     try {
       const membership = await prisma.workspaceMember.findUnique({
-        where: { userId_workspaceId: { userId: req.params.userId, workspaceId: req.params.wid } },
+        where: { userId_workspaceId: { userId: String(req.params.userId), workspaceId: String(req.params.wid) } },
       });
       if (!membership) {
         res.status(404).json({ success: false, error: "Member not found" });
@@ -340,7 +340,7 @@ workspaceRoutes.delete(
       // Prevent removing the last owner
       if (membership.role === "owner") {
         const ownerCount = await prisma.workspaceMember.count({
-          where: { workspaceId: req.params.wid, role: "owner" },
+          where: { workspaceId: String(req.params.wid), role: "owner" },
         });
         if (ownerCount <= 1) {
           res.status(400).json({ success: false, error: "Cannot remove the last owner" });
@@ -349,7 +349,7 @@ workspaceRoutes.delete(
       }
 
       await prisma.workspaceMember.delete({
-        where: { userId_workspaceId: { userId: req.params.userId, workspaceId: req.params.wid } },
+        where: { userId_workspaceId: { userId: String(req.params.userId), workspaceId: String(req.params.wid) } },
       });
 
       res.json({ success: true, data: { message: "Member removed" } });

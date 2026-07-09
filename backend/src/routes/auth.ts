@@ -11,9 +11,8 @@ export const authRoutes = Router();
 // ---------- Helpers ----------
 
 function generateToken(userId: string, email: string): string {
-  return jwt.sign({ userId, email }, config.jwt.secret, {
-    expiresIn: config.jwt.expiresIn,
-  });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return jwt.sign({ userId, email }, config.jwt.secret, { expiresIn: config.jwt.expiresIn } as any);
 }
 
 /** Create a personal workspace for a new user and add them as owner. */

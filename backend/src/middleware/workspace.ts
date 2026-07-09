@@ -13,7 +13,7 @@ export async function requireWorkspaceMembership(
   res: Response,
   next: NextFunction,
 ): Promise<void> {
-  const wid = req.params.wid;
+  const wid = String(req.params.wid);
   if (!wid) {
     res.status(400).json({ success: false, error: "Workspace ID missing in URL" });
     return;
@@ -27,7 +27,7 @@ export async function requireWorkspaceMembership(
 
   try {
     const membership = await prisma.workspaceMember.findUnique({
-      where: { userId_workspaceId: { userId, workspaceId: wid } },
+      where: { userId_workspaceId: { userId, workspaceId: String(wid) } },
     });
 
     if (!membership) {
