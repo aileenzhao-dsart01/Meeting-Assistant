@@ -6,6 +6,57 @@ datasource db {
   provider = "postgresql"
 }
 
+// ── Users & Workspaces ──────────────────────────────────────────────
+
+model User {
+  id           String           @id @default(cuid())
+  email        String           @unique
+  passwordHash String
+  name         String?
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+  memberships  WorkspaceMember[]
+}
+
+model Workspace {
+  id             String           @id @default(cuid())
+  name           String
+  slug           String           @unique
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+  members        WorkspaceMember[]
+  meetings       Meeting[]
+  sharedMeetings SharedMeeting[]
+}
+
+model WorkspaceMember {
+  id          String    @id @default(cuid())
+  role        String    @default("member") // owner | admin | member
+  createdAt   DateTime  @default(now())
+
+  userId      String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  workspaceId String
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, workspaceId])
+}
+
+model SharedMeeting {
+  id              String    @id @default(cuid())
+  meetingId       String
+  meeting         Meeting   @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  workspaceId     String    // target workspace that can see this meeting
+  workspace       Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  sharedAt        DateTime  @default(now())
+  sharedByUserId  String?
+
+  @@unique([meetingId, workspaceId])
+}
+
+// ── Meetings & Tasks ─────────────────────────────────────────────────
+
 model Meeting {
   id           String   @id @default(cuid())
   title        String
@@ -20,7 +71,11 @@ model Meeting {
   error        String?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
-  tasks        Task[]
+
+  workspaceId String?
+  workspace   Workspace?    @relation(fields: [workspaceId], references: [id])
+  tasks       Task[]
+  sharedTo    SharedMeeting[]
 }
 
 model Task {

@@ -2,9 +2,13 @@ import express from "express";
 import cors from "cors";
 import { config } from "./config";
 import { prisma } from "./db";
+import { authRoutes } from "./routes/auth";
+import { workspaceRoutes } from "./routes/workspaces";
 import { meetingRoutes } from "./routes/meetings";
-import { transcriptRoutes } from "./routes/transcripts";
-import { taskRoutes } from "./routes/tasks";
+import { legacyMeetingRoutes } from "./routes/legacy-meetings";
+import { requireAuth } from "./middleware/auth";
+import { requireWorkspaceMembership } from "./middleware/workspace";
+import { errorHandler } from "./middleware/errorHandler";
 
 const app = express();
 
@@ -12,17 +16,20 @@ const app = express();
 app.use(
   cors({
     origin: (origin, callback) => {
-      // Allow requests with no origin (curl, server-to-server)
       if (!origin) return callback(null, true);
-      // Check against configured origins
       if (config.cors.origins.includes(origin)) return callback(null, true);
-      // Allow any *.lovableproject.com or *.lovable.app preview URL
-      if (origin.endsWith(".lovableproject.com") || origin.endsWith(".lovable.app")) return callback(null, true);
+      if (
+        origin.endsWith(".lovableproject.com") ||
+        origin.endsWith(".lovable.app") ||
+        origin.endsWith(".onrender.com")
+      )
+        return callback(null, true);
       callback(null, false);
     },
     methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: [
       "Content-Type",
+      "Authorization",
       "X-LLM-Provider",
       "X-LLM-Key",
       "X-LLM-Model",
@@ -37,9 +44,20 @@ app.get("/api/health", (_req, res) => {
   res.json({ success: true, data: { status: "ok", timestamp: new Date().toISOString() } });
 });
 
-app.use("/api/meetings", meetingRoutes);
-app.use("/api", transcriptRoutes);
-app.use("/api", taskRoutes);
+// Auth
+app.use("/api/auth", authRoutes);
+
+// Workspaces (CRUD + member management)
+app.use("/api/workspaces", workspaceRoutes);
+
+// Workspace-scoped meetings (primary API) — auth + membership verified at mount
+app.use("/api/workspaces/:wid/meetings", requireAuth, requireWorkspaceMembership, meetingRoutes);
+
+// Legacy flat meeting routes (backward compat)
+app.use("/api/meetings", legacyMeetingRoutes);
+
+// ---------- Global error handler (must be last) ----------
+app.use(errorHandler);
 
 // ---------- Start ----------
 async function main() {

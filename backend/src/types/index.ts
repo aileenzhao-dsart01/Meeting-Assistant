@@ -38,6 +38,11 @@ export interface MeetingDetail {
   tasks: TaskItem[];
   createdAt: string;
   updatedAt: string;
+  /**
+   * @deprecated Use workspace-scoped routes instead.
+   * Present only on legacy flat-route responses for backward compatibility.
+   */
+  workspaceId?: string;
 }
 
 export interface TaskItem {
@@ -47,3 +52,43 @@ export interface TaskItem {
   status: string;
   priority?: string;
 }
+
+// ---------- Auth & Workspaces ----------
+export interface AuthUser {
+  id: string;
+  email: string;
+  name: string | null;
+}
+
+export interface AuthWorkspace {
+  id: string;
+  name: string;
+  slug: string;
+  role: string;
+}
+
+export interface WorkspaceResponse {
+  id: string;
+  name: string;
+  slug: string;
+  role: string;
+  memberCount: number;
+  createdAt: string;
+}
+
+export interface MemberResponse {
+  id: string;
+  userId: string;
+  email: string;
+  name: string | null;
+  role: string;
+  joinedAt: string;
+}
+
+export interface JwtPayload {
+  userId: string;
+  email: string;
+}
+
+/** Role hierarchy: owner > admin > member */
+export type WorkspaceRole = "owner" | "admin" | "member";
