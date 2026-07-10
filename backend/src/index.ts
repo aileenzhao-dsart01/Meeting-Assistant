@@ -2,7 +2,6 @@ import express from "express";
 import cors from "cors";
 import { config } from "./config";
 import { prisma } from "./db";
-import { authRoutes } from "./routes/auth";
 import { workspaceRoutes } from "./routes/workspaces";
 import { meetingRoutes } from "./routes/meetings";
 import { legacyMeetingRoutes } from "./routes/legacy-meetings";
@@ -44,9 +43,6 @@ app.get("/api/health", (_req, res) => {
   res.json({ success: true, data: { status: "ok", timestamp: new Date().toISOString() } });
 });
 
-// Auth
-app.use("/api/auth", authRoutes);
-
 // Workspaces (CRUD + member management)
 app.use("/api/workspaces", workspaceRoutes);
 
@@ -62,12 +58,12 @@ app.use(errorHandler);
 // ---------- Start ----------
 async function main() {
   await prisma.$connect();
-  console.log("✓ Database connected");
+  console.log(" Database connected");
 
   app.listen(config.port, config.host, () => {
-    console.log(`✓ Server running at http://${config.host}:${config.port}`);
-    console.log(`✓ LLM provider: ${config.llm.provider}`);
-    console.log(`✓ CORS origins: ${config.cors.origins.join(", ")}`);
+    console.log(` Server running at http://${config.host}:${config.port}`);
+    console.log(` LLM provider: ${config.llm.provider}`);
+    console.log(` CORS origins: ${config.cors.origins.join(", ")}`);
   });
 }
 

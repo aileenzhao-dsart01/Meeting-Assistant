@@ -2,15 +2,11 @@ import dotenv from "dotenv";
 import path from "path";
 import { PrismaClient } from "@prisma/client";
 import { PrismaPg } from "@prisma/adapter-pg";
-import bcrypt from "bcryptjs";
 
-// Load .env so PrismaClient can find DATABASE_URL
 dotenv.config({ path: path.resolve(__dirname, "..", ".env") });
 
 const databaseUrl = process.env.DATABASE_URL;
-if (!databaseUrl) {
-  throw new Error("DATABASE_URL is not set in .env");
-}
+if (!databaseUrl) throw new Error("DATABASE_URL is not set in .env");
 
 const adapter = new PrismaPg(databaseUrl);
 const prisma = new PrismaClient({ adapter });
@@ -25,36 +21,17 @@ async function main() {
     return;
   }
 
-  // 1. Create admin user (if not exists)
-  const adminEmail = "admin@meeting-assistant.local";
-  let adminUser = await prisma.user.findUnique({ where: { email: adminEmail } });
-
-  if (!adminUser) {
-    adminUser = await prisma.user.create({
-      data: {
-        email: adminEmail,
-        passwordHash: await bcrypt.hash("admin123", 12),
-        name: "Admin",
-      },
-    });
-    console.log("✓ Admin user created:", adminUser.email);
-  } else {
-    console.log("Admin user already exists");
-  }
-
-  // 2. Create default workspace
+  // Create default workspace (no admin user — auth is through Supabase)
   const defaultWorkspace = await prisma.workspace.create({
     data: {
       name: "Default Workspace",
       slug: "default-workspace",
-      members: {
-        create: { userId: adminUser.id, role: "owner" },
-      },
     },
   });
-  console.log("✓ Default workspace created:", defaultWorkspace.name);
+  console.log(" Default workspace created:", defaultWorkspace.name);
 
-  // 3. Assign all existing orphan meetings to the default workspace
+  // Assign all existing orphan meetings to the default workspace
+  // Also set createdBy for meetings with the placeholder UUID
   const orphanCount = await prisma.meeting.count({
     where: { workspaceId: null },
   });
@@ -62,11 +39,24 @@ async function main() {
   if (orphanCount > 0) {
     await prisma.meeting.updateMany({
       where: { workspaceId: null },
-      data: { workspaceId: defaultWorkspace.id },
+      data: {
+        workspaceId: defaultWorkspace.id,
+        createdBy: "00000000-0000-0000-0000-000000000000",
+      },
     });
-    console.log(`✓ Assigned ${orphanCount} existing meetings to default workspace`);
-  } else {
-    console.log("No orphan meetings to assign");
+    console.log(` Assigned ${orphanCount} existing meetings to default workspace`);
+  }
+
+  // Also set createdBy for any meetings that still have the old placeholder
+  const unsetCreator = await prisma.meeting.count({
+    where: { createdBy: null },
+  });
+  if (unsetCreator > 0) {
+    await prisma.meeting.updateMany({
+      where: { createdBy: null },
+      data: { createdBy: "00000000-0000-0000-0000-000000000000" },
+    });
+    console.log(` Set createdBy on ${unsetCreator} meetings`);
   }
 
   console.log("Seed completed successfully!");

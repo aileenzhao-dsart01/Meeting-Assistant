@@ -73,8 +73,17 @@ export const config = {
       .map((s) => s.trim()),
   },
 
-  jwt: {
-    secret: process.env.JWT_SECRET || "dev-secret-change-in-production",
-    expiresIn: process.env.JWT_EXPIRES_IN || "24h",
+  supabase: {
+    url: process.env.SUPABASE_URL || "",
+    jwksUrl:
+      process.env.SUPABASE_JWKS_URL ||
+      `${process.env.SUPABASE_URL}/auth/v1/.well-known/jwks.json`,
+    projectRef: process.env.SUPABASE_PROJECT_REF || "",
+    serviceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY || "",
+  },
+
+  auth: {
+    // Anonymous users are allowed through (no 401) — only protected routes reject them
+    allowAnonymous: process.env.AUTH_ALLOW_ANONYMOUS !== "false",
   },
 } as const;

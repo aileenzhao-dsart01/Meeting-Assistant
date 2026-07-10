@@ -8,11 +8,12 @@ import { getStorageProvider } from "../services/storage";
 import { LlmOverride } from "../services/summarizer";
 import { requireWorkspaceAdmin } from "../middleware/workspace";
 import { AppError, Errors } from "../utils/errors";
+import { WorkspaceRole } from "../types";
 
 export const meetingRoutes = Router();
 
 // NOTE: Auth + workspace membership are applied at mount time in index.ts.
-// Individual sharing routes that need admin role use requireWorkspaceAdmin explicitly.
+// req.workspace is available with { id, role }.
 
 // ---------- Helpers ----------
 
@@ -32,39 +33,46 @@ function getMimeType(filename: string): string {
   return MIME_TYPES[ext] || "application/octet-stream";
 }
 
-/** Check whether the request's workspace owns the meeting (full access)
- *  vs only has shared access (read-only). Throws if no access at all. */
-async function resolveMeetingAccess(
+/** Resolve meeting + check access for the current user + workspace. */
+async function resolveMeeting(
   meetingId: string,
   workspaceId: string,
-): Promise<{ meeting: any; access: "own" | "shared" }> {
+  userId: string,
+  role: WorkspaceRole,
+) {
+  const isOwnerAdmin = role === "owner" || role === "admin";
+  const isViewer = role === "viewer";
+
   const meeting = await prisma.meeting.findFirst({
     where: {
       id: meetingId,
-      OR: [
-        { workspaceId },                              // owned
-        { sharedTo: { some: { workspaceId } } },      // shared with us
-      ],
+      workspaceId,
+      ...(isViewer
+        ? { OR: [{ createdBy: userId }, { shares: { some: { sharedWithUserId: userId } } }] }
+        : {}),
     },
     include: { tasks: { orderBy: { createdAt: "desc" as const } } },
   });
 
   if (!meeting) throw Errors.notFound("Meeting not found");
 
-  const access: "own" | "shared" =
-    meeting.workspaceId === workspaceId ? "own" : "shared";
+  const isCreator = meeting.createdBy === userId;
+  const canEdit = isOwnerAdmin || (role === "member" && isCreator);
+  const access = canEdit ? ("own" as const) : ("shared" as const);
 
-  return { meeting, access };
+  return { meeting, access, canEdit, isCreator };
 }
 
-/** Assert the requester owns (not merely has shared access to) the meeting. */
-function assertOwnAccess(access: "own" | "shared"): void {
+/** Check that the requester can edit this meeting. */
+function assertCanEdit(access: "own" | "shared"): void {
   if (access !== "own") {
-    throw Errors.forbidden("Cannot modify a meeting shared with this workspace");
+    throw Errors.insufficientPermissions(
+      "You do not have permission to modify this meeting",
+    );
   }
 }
 
-function formatMeeting(m: any, meetingAccess: "own" | "shared") {
+function formatMeeting(m: any, access: "own" | "shared") {
   return {
     id: m.id,
     title: m.title,
@@ -78,14 +86,16 @@ function formatMeeting(m: any, meetingAccess: "own" | "shared") {
     topics: m.topics ? JSON.parse(m.topics) : null,
     error: m.error,
     workspaceId: m.workspaceId,
-    access: meetingAccess,
-    tasks: m.tasks?.map((t: any) => ({
-      id: t.id,
-      description: t.description,
-      assignee: t.assignee,
-      status: t.status,
-      priority: t.priority,
-    })) ?? [],
+    createdBy: m.createdBy,
+    access,
+    tasks:
+      m.tasks?.map((t: any) => ({
+        id: t.id,
+        description: t.description,
+        assignee: t.assignee,
+        status: t.status,
+        priority: t.priority,
+      })) ?? [],
     createdAt: m.createdAt instanceof Date ? m.createdAt.toISOString() : m.createdAt,
     updatedAt: m.updatedAt instanceof Date ? m.updatedAt.toISOString() : m.updatedAt,
   };
@@ -100,6 +110,8 @@ function formatMeetingListItem(m: any) {
     status: m.status,
     taskCount: m._count?.tasks ?? 0,
     workspaceId: m.workspaceId,
+    createdBy: m.createdBy,
+    access: m._access || "own",
   };
 }
 
@@ -125,51 +137,54 @@ const upload = multer({
 // MEETING CRUD
 // ════════════════════════════════════════════════════════════════════
 
-// ---------- LIST meetings (owned + shared) ----------
+// ---------- LIST meetings ----------
 meetingRoutes.get("/", async (req: Request, res: Response) => {
   try {
     const { status, page = "1", limit = "20" } = req.query;
     const skip = (parseInt(page as string) - 1) * parseInt(limit as string);
     const take = parseInt(limit as string);
     const wid = req.workspace!.id;
-
-    // Fetch owned meetings + IDs of meetings shared with this workspace
-    const sharedMeetingIds = (
-      await prisma.sharedMeeting.findMany({
-        where: { workspaceId: wid },
-        select: { meetingId: true },
-      })
-    ).map((s) => s.meetingId);
+    const userId = req.user!.id;
+    const role = req.workspace!.role;
 
     const whereStatus = status ? { status: status as string } : {};
 
+    // Owner/admin/member: see all meetings in workspace
+    // Viewer: only see shared meetings or ones they created
+    const isOwnerAdmin = role === "owner" || role === "admin";
+    const isViewer = role === "viewer";
+
+    let where: any = { workspaceId: wid, ...whereStatus };
+
+    if (isViewer) {
+      where.OR = [
+        { createdBy: userId },
+        { shares: { some: { sharedWithUserId: userId } } },
+      ];
+    }
+
     const [meetings, total] = await Promise.all([
       prisma.meeting.findMany({
-        where: {
-          OR: [
-            { workspaceId: wid, ...whereStatus },
-            { id: { in: sharedMeetingIds }, ...whereStatus },
-          ],
-        },
+        where,
         skip,
         take,
         orderBy: { createdAt: "desc" as const },
         include: { _count: { select: { tasks: true } } },
       }),
-      prisma.meeting.count({
-        where: {
-          OR: [
-            { workspaceId: wid, ...whereStatus },
-            { id: { in: sharedMeetingIds }, ...whereStatus },
-          ],
-        },
-      }),
+      prisma.meeting.count({ where }),
     ]);
+
+    // Determine access for each meeting
+    const items = meetings.map((m) => {
+      const isCreator = m.createdBy === userId;
+      const canEdit = isOwnerAdmin || (role === "member" && isCreator);
+      return { ...formatMeetingListItem(m), access: canEdit ? "own" : "shared" };
+    });
 
     res.json({
       success: true,
       data: {
-        meetings: meetings.map(formatMeetingListItem),
+        meetings: items,
         total,
         page: parseInt(page as string),
         limit: take,
@@ -177,17 +192,23 @@ meetingRoutes.get("/", async (req: Request, res: Response) => {
     });
   } catch (err) {
     if (err instanceof AppError) throw err;
-    console.error("✗ Failed to list meetings:", err);
-    res.status(500).json({ success: false, error: "Failed to list meetings" });
+    console.error(" Failed to list meetings:", err);
+    res.status(500).json({ error: "server_error", message: "Failed to list meetings" });
   }
 });
 
 // ---------- CREATE meeting ----------
 meetingRoutes.post("/", async (req: Request, res: Response) => {
   try {
+    // Only owner/admin/member can create — not viewer
+    if (req.workspace!.role === "viewer") {
+      res.status(403).json({ error: "insufficient_permissions", message: "Viewers cannot create meetings" });
+      return;
+    }
+
     const { title } = req.body;
     if (!title || typeof title !== "string") {
-      res.status(400).json({ success: false, error: "Title is required" });
+      res.status(400).json({ error: "validation_error", message: "Title is required" });
       return;
     }
 
@@ -195,6 +216,7 @@ meetingRoutes.post("/", async (req: Request, res: Response) => {
       data: {
         title,
         workspaceId: req.workspace!.id,
+        createdBy: req.user!.id,
         status: "pending",
       },
     });
@@ -214,56 +236,58 @@ meetingRoutes.post("/", async (req: Request, res: Response) => {
     });
   } catch (err) {
     if (err instanceof AppError) throw err;
-    console.error("✗ Failed to create meeting:", err);
-    res.status(500).json({ success: false, error: "Failed to create meeting" });
+    console.error(" Failed to create meeting:", err);
+    res.status(500).json({ error: "server_error", message: "Failed to create meeting" });
   }
 });
 
 // ---------- GET meeting ----------
 meetingRoutes.get("/:mid", async (req: Request, res: Response) => {
   try {
-    const { meeting, access } = await resolveMeetingAccess(
+    const { meeting, access } = await resolveMeeting(
       String(req.params.mid),
       req.workspace!.id,
+      req.user!.id,
+      req.workspace!.role,
     );
     res.json({ success: true, data: formatMeeting(meeting, access) });
   } catch (err) {
     if (err instanceof AppError) throw err;
-    console.error("✗ Failed to get meeting:", err);
-    res.status(500).json({ success: false, error: "Failed to get meeting" });
+    console.error(" Failed to get meeting:", err);
+    res.status(500).json({ error: "server_error", message: "Failed to get meeting" });
   }
 });
 
 // ---------- PATCH meeting ----------
 meetingRoutes.patch("/:mid", async (req: Request, res: Response) => {
   try {
-    const { meeting, access } = await resolveMeetingAccess(
+    const { meeting, access } = await resolveMeeting(
       String(req.params.mid),
       req.workspace!.id,
+      req.user!.id,
+      req.workspace!.role,
     );
-    assertOwnAccess(access);
+    assertCanEdit(access);
 
     const { title, duration } = req.body;
     const data: Record<string, unknown> = {};
 
     if (title !== undefined) {
       if (typeof title !== "string" || !title.trim()) {
-        res.status(400).json({ success: false, error: "Invalid title" });
+        res.status(400).json({ error: "validation_error", message: "Invalid title" });
         return;
       }
       data.title = title.trim();
     }
-
     if (duration !== undefined) {
       if (typeof duration !== "number" || duration < 0) {
-        res.status(400).json({ success: false, error: "Invalid duration" });
+        res.status(400).json({ error: "validation_error", message: "Invalid duration" });
         return;
       }
       data.duration = Math.round(duration);
     }
-
     if (Object.keys(data).length === 0) {
-      res.status(400).json({ success: false, error: "No valid fields to update" });
+      res.status(400).json({ error: "validation_error", message: "No valid fields to update" });
       return;
     }
 
@@ -276,19 +300,21 @@ meetingRoutes.patch("/:mid", async (req: Request, res: Response) => {
     res.json({ success: true, data: formatMeeting(updated, "own") });
   } catch (err) {
     if (err instanceof AppError) throw err;
-    console.error("✗ Failed to update meeting:", err);
-    res.status(500).json({ success: false, error: "Failed to update meeting" });
+    console.error(" Failed to update meeting:", err);
+    res.status(500).json({ error: "server_error", message: "Failed to update meeting" });
   }
 });
 
 // ---------- DELETE meeting ----------
 meetingRoutes.delete("/:mid", async (req: Request, res: Response) => {
   try {
-    const { meeting, access } = await resolveMeetingAccess(
+    const { meeting, access } = await resolveMeeting(
       String(req.params.mid),
       req.workspace!.id,
+      req.user!.id,
+      req.workspace!.role,
     );
-    assertOwnAccess(access);
+    assertCanEdit(access);
 
     if (meeting.recordingUrl) {
       const storage = getStorageProvider();
@@ -299,8 +325,8 @@ meetingRoutes.delete("/:mid", async (req: Request, res: Response) => {
     res.json({ success: true, data: { message: "Meeting deleted" } });
   } catch (err) {
     if (err instanceof AppError) throw err;
-    console.error("✗ Failed to delete meeting:", err);
-    res.status(500).json({ success: false, error: "Failed to delete meeting" });
+    console.error(" Failed to delete meeting:", err);
+    res.status(500).json({ error: "server_error", message: "Failed to delete meeting" });
   }
 });
 
@@ -309,101 +335,94 @@ meetingRoutes.delete("/:mid", async (req: Request, res: Response) => {
 // ════════════════════════════════════════════════════════════════════
 
 // ---------- UPLOAD audio ----------
-meetingRoutes.post(
-  "/:mid/audio",
-  upload.single("audio"),
-  async (req: Request, res: Response) => {
-    try {
-      const { meeting, access } = await resolveMeetingAccess(
-        String(req.params.mid),
-        req.workspace!.id,
-      );
-      assertOwnAccess(access);
+meetingRoutes.post("/:mid/audio", upload.single("audio"), async (req: Request, res: Response) => {
+  try {
+    const { meeting, access } = await resolveMeeting(
+      String(req.params.mid),
+      req.workspace!.id,
+      req.user!.id,
+      req.workspace!.role,
+    );
+    assertCanEdit(access);
 
-      if (!req.file) {
-        res.status(400).json({ success: false, error: "No audio file provided" });
-        return;
-      }
-
-      const tmpPath = req.file.path;
-      const filename = req.file.filename;
-
-      if (!fs.existsSync(tmpPath)) {
-        res.status(500).json({ success: false, error: "Audio file was not saved" });
-        return;
-      }
-
-      const fileSize = fs.statSync(tmpPath).size;
-      if (fileSize === 0) {
-        fs.unlinkSync(tmpPath);
-        res.status(400).json({ success: false, error: "Uploaded audio file is empty" });
-        return;
-      }
-
-      const storage = getStorageProvider();
-      const mimeType = getMimeType(filename);
-
-      // Enhance audio before storing
-      let savedFilename = filename;
-      let enhancedData: Buffer;
-      try {
-        const { normalizeAudio } = await import("../services/transcription");
-        const normalizedPath = normalizeAudio(tmpPath);
-        enhancedData = fs.readFileSync(normalizedPath);
-        savedFilename = filename.replace(/\.[^.]+$/, ".wav");
-        if (normalizedPath !== tmpPath && fs.existsSync(normalizedPath)) {
-          try { fs.unlinkSync(normalizedPath); } catch { /* ignore */ }
-        }
-      } catch {
-        enhancedData = fs.readFileSync(tmpPath);
-      }
-
-      const savedMimeType = getMimeType(savedFilename);
-      await storage.save(savedFilename, enhancedData, savedMimeType);
-
-      try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
-
-      const updated = await prisma.meeting.update({
-        where: { id: String(req.params.mid) },
-        data: { recordingUrl: savedFilename, status: "uploading" },
-      });
-
-      res.json({ success: true, data: { ...updated, access: "own" } });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "Unknown error";
-      console.error(`✗ Audio upload failed for meeting ${String(req.params.mid)}:`, message);
-      res.status(500).json({ success: false, error: `Failed to upload audio: ${message}` });
+    if (!req.file) {
+      res.status(400).json({ error: "validation_error", message: "No audio file provided" });
+      return;
     }
-  },
-);
+
+    const tmpPath = req.file.path;
+    const filename = req.file.filename;
+
+    if (!fs.existsSync(tmpPath)) {
+      res.status(500).json({ error: "server_error", message: "Audio file was not saved" });
+      return;
+    }
+    const fileSize = fs.statSync(tmpPath).size;
+    if (fileSize === 0) {
+      fs.unlinkSync(tmpPath);
+      res.status(400).json({ error: "validation_error", message: "Uploaded audio file is empty" });
+      return;
+    }
+
+    const storage = getStorageProvider();
+    let savedFilename = filename;
+    let enhancedData: Buffer;
+    try {
+      const { normalizeAudio } = await import("../services/transcription");
+      const normalizedPath = normalizeAudio(tmpPath);
+      enhancedData = fs.readFileSync(normalizedPath);
+      savedFilename = filename.replace(/\.[^.]+$/, ".wav");
+      if (normalizedPath !== tmpPath && fs.existsSync(normalizedPath)) {
+        try { fs.unlinkSync(normalizedPath); } catch { /* ignore */ }
+      }
+    } catch {
+      enhancedData = fs.readFileSync(tmpPath);
+    }
+
+    await storage.save(savedFilename, enhancedData, getMimeType(savedFilename));
+    try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
+
+    const updated = await prisma.meeting.update({
+      where: { id: String(req.params.mid) },
+      data: { recordingUrl: savedFilename, status: "uploading" },
+    });
+
+    res.json({ success: true, data: { ...updated, access: "own" } });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    console.error(` Audio upload failed: ${message}`);
+    res.status(500).json({ error: "server_error", message: `Failed to upload audio: ${message}` });
+  }
+});
 
 // ---------- DOWNLOAD audio ----------
 meetingRoutes.get("/:mid/audio", async (req: Request, res: Response) => {
   try {
-    const { meeting, access } = await resolveMeetingAccess(
+    const { meeting } = await resolveMeeting(
       String(req.params.mid),
       req.workspace!.id,
+      req.user!.id,
+      req.workspace!.role,
     );
 
     if (!meeting.recordingUrl) {
-      res.status(404).json({ success: false, error: "Audio not found" });
+      res.status(404).json({ error: "not_found", message: "Audio not found" });
       return;
     }
 
     const storage = getStorageProvider();
     const data = await storage.read(meeting.recordingUrl);
     if (!data) {
-      res.status(404).json({ success: false, error: "Audio file not found" });
+      res.status(404).json({ error: "not_found", message: "Audio file not found" });
       return;
     }
 
-    const mimeType = getMimeType(meeting.recordingUrl);
-    res.setHeader("Content-Type", mimeType);
+    res.setHeader("Content-Type", getMimeType(meeting.recordingUrl));
     res.send(data);
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
-    console.error(`✗ Audio download failed for meeting ${String(req.params.mid)}:`, message);
-    res.status(500).json({ success: false, error: `Failed to download audio: ${message}` });
+    console.error(` Audio download failed: ${message}`);
+    res.status(500).json({ error: "server_error", message: "Failed to download audio" });
   }
 });
 
@@ -411,32 +430,31 @@ meetingRoutes.get("/:mid/audio", async (req: Request, res: Response) => {
 // PROCESS (transcribe + summarize)
 // ════════════════════════════════════════════════════════════════════
 
-// ---------- POST process ----------
 meetingRoutes.post("/:mid/process", async (req: Request, res: Response) => {
   try {
-    const { meeting, access } = await resolveMeetingAccess(
+    const { meeting, access } = await resolveMeeting(
       String(req.params.mid),
       req.workspace!.id,
+      req.user!.id,
+      req.workspace!.role,
     );
-    assertOwnAccess(access);
+    assertCanEdit(access);
 
     if (!meeting.recordingUrl) {
-      res.status(400).json({ success: false, error: "No audio uploaded yet" });
+      res.status(400).json({ error: "validation_error", message: "No audio uploaded yet" });
       return;
     }
 
-    // Verify audio file exists
     const storage = getStorageProvider();
     const fileExists = await storage.exists(meeting.recordingUrl);
     if (!fileExists) {
       res.status(400).json({
-        success: false,
-        error: `Audio file "${meeting.recordingUrl}" not found in storage. Please upload again.`,
+        error: "validation_error",
+        message: `Audio file "${meeting.recordingUrl}" not found in storage. Please upload again.`,
       });
       return;
     }
 
-    // Idempotency
     if (["transcribing", "summarizing"].includes(meeting.status)) {
       res.status(202).json({
         success: true,
@@ -452,14 +470,12 @@ meetingRoutes.post("/:mid/process", async (req: Request, res: Response) => {
       });
     }
 
-    // Capture optional LLM override headers
     const llmOverride: Partial<LlmOverride> = {};
     if (req.headers["x-llm-provider"]) llmOverride.provider = String(req.headers["x-llm-provider"]);
     if (req.headers["x-llm-key"]) llmOverride.apiKey = String(req.headers["x-llm-key"]);
     if (req.headers["x-llm-model"]) llmOverride.model = String(req.headers["x-llm-model"]);
     if (req.headers["x-llm-base-url"]) llmOverride.baseURL = String(req.headers["x-llm-base-url"]);
 
-    // Kick off async processing
     processMeeting(meeting.id, llmOverride).catch((err) =>
       console.error(`Processing failed for meeting ${meeting.id}:`, err)
     );
@@ -470,33 +486,38 @@ meetingRoutes.post("/:mid/process", async (req: Request, res: Response) => {
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
-    console.error(`✗ Failed to start processing for meeting ${String(req.params.mid)}:`, message);
-    res.status(500).json({ success: false, error: `Failed to start processing: ${message}` });
+    console.error(` Failed to start processing: ${message}`);
+    res.status(500).json({ error: "server_error", message: `Failed to start processing: ${message}` });
   }
 });
 
 // ════════════════════════════════════════════════════════════════════
-// TRANSCRIPT / SUMMARY (read-only for shared)
+// TRANSCRIPT / SUMMARY
 // ════════════════════════════════════════════════════════════════════
 
-// ---------- GET transcript ----------
 meetingRoutes.get("/:mid/transcript", async (req: Request, res: Response) => {
   try {
-    const { meeting } = await resolveMeetingAccess(String(req.params.mid), req.workspace!.id);
-    res.json({
-      success: true,
-      data: { transcript: meeting.transcript, status: meeting.status },
-    });
+    const { meeting } = await resolveMeeting(
+      String(req.params.mid),
+      req.workspace!.id,
+      req.user!.id,
+      req.workspace!.role,
+    );
+    res.json({ success: true, data: { transcript: meeting.transcript, status: meeting.status } });
   } catch (err) {
     if (err instanceof AppError) throw err;
-    res.status(500).json({ success: false, error: "Failed to get transcript" });
+    res.status(500).json({ error: "server_error", message: "Failed to get transcript" });
   }
 });
 
-// ---------- GET summary ----------
 meetingRoutes.get("/:mid/summary", async (req: Request, res: Response) => {
   try {
-    const { meeting } = await resolveMeetingAccess(String(req.params.mid), req.workspace!.id);
+    const { meeting } = await resolveMeeting(
+      String(req.params.mid),
+      req.workspace!.id,
+      req.user!.id,
+      req.workspace!.role,
+    );
     res.json({
       success: true,
       data: {
@@ -508,7 +529,7 @@ meetingRoutes.get("/:mid/summary", async (req: Request, res: Response) => {
     });
   } catch (err) {
     if (err instanceof AppError) throw err;
-    res.status(500).json({ success: false, error: "Failed to get summary" });
+    res.status(500).json({ error: "server_error", message: "Failed to get summary" });
   }
 });
 
@@ -516,10 +537,14 @@ meetingRoutes.get("/:mid/summary", async (req: Request, res: Response) => {
 // TASKS
 // ════════════════════════════════════════════════════════════════════
 
-// ---------- LIST tasks ----------
 meetingRoutes.get("/:mid/tasks", async (req: Request, res: Response) => {
   try {
-    const { meeting } = await resolveMeetingAccess(String(req.params.mid), req.workspace!.id);
+    const { meeting } = await resolveMeeting(
+      String(req.params.mid),
+      req.workspace!.id,
+      req.user!.id,
+      req.workspace!.role,
+    );
     const tasks = await prisma.task.findMany({
       where: { meetingId: meeting.id },
       orderBy: [{ priority: "asc" as const }, { createdAt: "desc" as const }],
@@ -527,16 +552,19 @@ meetingRoutes.get("/:mid/tasks", async (req: Request, res: Response) => {
     res.json({ success: true, data: tasks });
   } catch (err) {
     if (err instanceof AppError) throw err;
-    res.status(500).json({ success: false, error: "Failed to get tasks" });
+    res.status(500).json({ error: "server_error", message: "Failed to get tasks" });
   }
 });
 
-// ---------- PATCH task ----------
 meetingRoutes.patch("/:mid/tasks/:tid", async (req: Request, res: Response) => {
   try {
-    // Verify meeting access (own required for task mutation)
-    const { access } = await resolveMeetingAccess(String(req.params.mid), req.workspace!.id);
-    assertOwnAccess(access);
+    const { access } = await resolveMeeting(
+      String(req.params.mid),
+      req.workspace!.id,
+      req.user!.id,
+      req.workspace!.role,
+    );
+    assertCanEdit(access);
 
     const { status, assignee, priority } = req.body;
     const data: Record<string, unknown> = {};
@@ -545,13 +573,13 @@ meetingRoutes.patch("/:mid/tasks/:tid", async (req: Request, res: Response) => {
     if (priority !== undefined) data.priority = priority;
 
     if (Object.keys(data).length === 0) {
-      res.status(400).json({ success: false, error: "No valid fields to update" });
+      res.status(400).json({ error: "validation_error", message: "No valid fields to update" });
       return;
     }
 
     const task = await prisma.task.findUnique({ where: { id: String(req.params.tid) } });
     if (!task || task.meetingId !== String(req.params.mid)) {
-      res.status(404).json({ success: false, error: "Task not found" });
+      res.status(404).json({ error: "not_found", message: "Task not found" });
       return;
     }
 
@@ -559,148 +587,140 @@ meetingRoutes.patch("/:mid/tasks/:tid", async (req: Request, res: Response) => {
       where: { id: String(req.params.tid) },
       data,
     });
-
     res.json({ success: true, data: updated });
   } catch (err) {
     if (err instanceof AppError) throw err;
-    console.error("✗ Failed to update task:", err);
-    res.status(500).json({ success: false, error: "Failed to update task" });
+    console.error(" Failed to update task:", err);
+    res.status(500).json({ error: "server_error", message: "Failed to update task" });
   }
 });
 
 // ════════════════════════════════════════════════════════════════════
-// SHARING
+// MEETING SHARES (user-level sharing)
 // ════════════════════════════════════════════════════════════════════
 
-// ---------- GET shared-with (list workspaces this meeting is shared with) ----------
+// ---------- GET shared-with ----------
 meetingRoutes.get("/:mid/shared-with", async (req: Request, res: Response) => {
   try {
-    const { meeting, access } = await resolveMeetingAccess(String(req.params.mid), req.workspace!.id);
-    assertOwnAccess(access);
+    const { meeting, access } = await resolveMeeting(
+      String(req.params.mid),
+      req.workspace!.id,
+      req.user!.id,
+      req.workspace!.role,
+    );
+    assertCanEdit(access);
 
-    const shared = await prisma.sharedMeeting.findMany({
+    const shares = await prisma.meetingShare.findMany({
       where: { meetingId: meeting.id },
-      include: {
-        workspace: { select: { id: true, name: true, slug: true } },
-      },
+      orderBy: { sharedAt: "desc" as const },
     });
 
     res.json({
       success: true,
-      data: shared.map((s) => ({
-        workspaceId: s.workspace.id,
-        workspaceName: s.workspace.name,
-        workspaceSlug: s.workspace.slug,
+      data: shares.map((s) => ({
+        userId: s.sharedWithUserId,
+        sharedByUserId: s.sharedByUserId,
         sharedAt: s.sharedAt.toISOString(),
       })),
     });
   } catch (err) {
     if (err instanceof AppError) throw err;
-    res.status(500).json({ success: false, error: "Failed to get sharing info" });
+    res.status(500).json({ error: "server_error", message: "Failed to get sharing info" });
   }
 });
 
-// ---------- POST share (share meeting with another workspace) ----------
-meetingRoutes.post(
-  "/:mid/share",
-  requireWorkspaceAdmin,    // re-assert admin on the current workspace
-  async (req: Request, res: Response) => {
-    try {
-      const { meeting, access } = await resolveMeetingAccess(String(req.params.mid), req.workspace!.id);
-      assertOwnAccess(access);
-
-      const { targetWorkspaceId } = req.body;
-      if (!targetWorkspaceId || typeof targetWorkspaceId !== "string") {
-        res.status(400).json({ success: false, error: "targetWorkspaceId is required" });
-        return;
-      }
-
-      // Verify the target workspace exists
-      const targetWorkspace = await prisma.workspace.findUnique({
-        where: { id: targetWorkspaceId },
-      });
-      if (!targetWorkspace) {
-        res.status(404).json({ success: false, error: "Target workspace not found" });
-        return;
-      }
-
-      // Don't share with self
-      if (targetWorkspaceId === req.workspace!.id) {
-        res.status(400).json({ success: false, error: "Cannot share a meeting with its own workspace" });
-        return;
-      }
-
-      // Check if already shared
-      const existing = await prisma.sharedMeeting.findUnique({
-        where: { meetingId_workspaceId: { meetingId: meeting.id, workspaceId: targetWorkspaceId } },
-      });
-      if (existing) {
-        res.status(409).json({ success: false, error: "Meeting is already shared with this workspace" });
-        return;
-      }
-
-      const shared = await prisma.sharedMeeting.create({
-        data: {
-          meetingId: meeting.id,
-          workspaceId: targetWorkspaceId,
-          sharedByUserId: req.user!.id,
-        },
-      });
-
-      res.status(201).json({
-        success: true,
-        data: {
-          meetingId: shared.meetingId,
-          workspaceId: shared.workspaceId,
-          sharedAt: shared.sharedAt.toISOString(),
-        },
-      });
-    } catch (err) {
-      if (err instanceof AppError) throw err;
-      console.error("✗ Failed to share meeting:", err);
-      res.status(500).json({ success: false, error: "Failed to share meeting" });
+// ---------- POST share (share with a user) ----------
+meetingRoutes.post("/:mid/share", async (req: Request, res: Response) => {
+  try {
+    // Only owner/admin can share
+    if (req.workspace!.role !== "owner" && req.workspace!.role !== "admin") {
+      res.status(403).json({ error: "insufficient_permissions", message: "Only admins can share meetings" });
+      return;
     }
-  },
-);
 
-// ---------- DELETE share (unshare) ----------
-meetingRoutes.delete(
-  "/:mid/share",
-  requireWorkspaceAdmin,
-  async (req: Request, res: Response) => {
-    try {
-      const { meeting, access } = await resolveMeetingAccess(String(req.params.mid), req.workspace!.id);
-      assertOwnAccess(access);
+    const { meeting, access } = await resolveMeeting(
+      String(req.params.mid),
+      req.workspace!.id,
+      req.user!.id,
+      req.workspace!.role,
+    );
+    assertCanEdit(access);
 
-      const targetWorkspaceId = req.query.targetWorkspaceId as string;
-      if (!targetWorkspaceId) {
-        res.status(400).json({ success: false, error: "targetWorkspaceId query parameter is required" });
-        return;
-      }
-
-      const existing = await prisma.sharedMeeting.findUnique({
-        where: { meetingId_workspaceId: { meetingId: meeting.id, workspaceId: targetWorkspaceId } },
-      });
-      if (!existing) {
-        res.status(404).json({ success: false, error: "Meeting is not shared with this workspace" });
-        return;
-      }
-
-      await prisma.sharedMeeting.delete({
-        where: { meetingId_workspaceId: { meetingId: meeting.id, workspaceId: targetWorkspaceId } },
-      });
-
-      res.json({ success: true, data: { message: "Meeting unshared" } });
-    } catch (err) {
-      if (err instanceof AppError) throw err;
-      console.error("✗ Failed to unshare meeting:", err);
-      res.status(500).json({ success: false, error: "Failed to unshare meeting" });
+    const { userId } = req.body;
+    if (!userId || typeof userId !== "string") {
+      res.status(400).json({ error: "validation_error", message: "userId is required (Supabase UUID)" });
+      return;
     }
-  },
-);
+
+    const existing = await prisma.meetingShare.findUnique({
+      where: { meetingId_sharedWithUserId: { meetingId: meeting.id, sharedWithUserId: userId } },
+    });
+    if (existing) {
+      res.status(409).json({ error: "conflict", message: "Meeting is already shared with this user" });
+      return;
+    }
+
+    const share = await prisma.meetingShare.create({
+      data: {
+        meetingId: meeting.id,
+        sharedWithUserId: userId,
+        sharedByUserId: req.user!.id,
+      },
+    });
+
+    res.status(201).json({
+      success: true,
+      data: {
+        userId: share.sharedWithUserId,
+        sharedByUserId: share.sharedByUserId,
+        sharedAt: share.sharedAt.toISOString(),
+      },
+    });
+  } catch (err) {
+    if (err instanceof AppError) throw err;
+    console.error(" Failed to share meeting:", err);
+    res.status(500).json({ error: "server_error", message: "Failed to share meeting" });
+  }
+});
+
+// ---------- DELETE share (unshare with a user) ----------
+meetingRoutes.delete("/:mid/share/:userId", async (req: Request, res: Response) => {
+  try {
+    if (req.workspace!.role !== "owner" && req.workspace!.role !== "admin") {
+      res.status(403).json({ error: "insufficient_permissions", message: "Only admins can unshare meetings" });
+      return;
+    }
+
+    const { meeting, access } = await resolveMeeting(
+      String(req.params.mid),
+      req.workspace!.id,
+      req.user!.id,
+      req.workspace!.role,
+    );
+    assertCanEdit(access);
+
+    const existing = await prisma.meetingShare.findUnique({
+      where: { meetingId_sharedWithUserId: { meetingId: meeting.id, sharedWithUserId: String(req.params.userId) } },
+    });
+    if (!existing) {
+      res.status(404).json({ error: "not_found", message: "Share not found" });
+      return;
+    }
+
+    await prisma.meetingShare.delete({
+      where: { meetingId_sharedWithUserId: { meetingId: meeting.id, sharedWithUserId: String(req.params.userId) } },
+    });
+
+    res.json({ success: true, data: { message: "Meeting unshared" } });
+  } catch (err) {
+    if (err instanceof AppError) throw err;
+    console.error(" Failed to unshare meeting:", err);
+    res.status(500).json({ error: "server_error", message: "Failed to unshare meeting" });
+  }
+});
 
 // ════════════════════════════════════════════════════════════════════
-// ASYNC PROCESSING PIPELINE (unchanged from original)
+// ASYNC PROCESSING PIPELINE
 // ════════════════════════════════════════════════════════════════════
 
 async function processMeeting(
@@ -721,9 +741,7 @@ async function processMeeting(
 
     const storage = getStorageProvider();
     const audioData = await storage.read(meeting.recordingUrl!);
-    if (!audioData) {
-      throw new Error(`Audio file "${meeting.recordingUrl}" not found in storage`);
-    }
+    if (!audioData) throw new Error(`Audio file "${meeting.recordingUrl}" not found in storage`);
 
     audioTmpPath = path.resolve(config.audio.storagePath, `.process-${meeting.recordingUrl}`);
     fs.writeFileSync(audioTmpPath, audioData);
@@ -763,10 +781,10 @@ async function processMeeting(
       });
     }
 
-    console.log(`✓ Meeting ${meetingId} processed successfully`);
+    console.log(`Meeting ${meetingId} processed successfully`);
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
-    console.error(`✗ Meeting ${meetingId} processing failed:`, message);
+    console.error(`Meeting ${meetingId} processing failed:`, message);
     await prisma.meeting.update({
       where: { id: meetingId },
       data: { status: "error", error: message },

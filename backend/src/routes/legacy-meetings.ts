@@ -13,13 +13,13 @@
 import { Router, Request, Response } from "express";
 import { prisma } from "../db";
 import { requireAuth } from "../middleware/auth";
+import { AppError, Errors } from "../utils/errors";
 import { getStorageProvider } from "../services/storage";
 import { LlmOverride } from "../services/summarizer";
 import path from "path";
 import fs from "fs";
 import multer from "multer";
 import { config } from "../config";
-import { AppError, Errors } from "../utils/errors";
 
 export const legacyMeetingRoutes = Router();
 
@@ -79,8 +79,8 @@ legacyMeetingRoutes.get("/", async (req: Request, res: Response) => {
     const take = parseInt(limit as string);
 
     const sharedMeetingIds = (
-      await prisma.sharedMeeting.findMany({
-        where: { workspaceId: wid },
+      await prisma.meetingShare.findMany({
+        where: { sharedWithUserId: req.user!.id },
         select: { meetingId: true },
       })
     ).map((s) => s.meetingId);
@@ -129,7 +129,7 @@ legacyMeetingRoutes.get("/", async (req: Request, res: Response) => {
     });
   } catch (err) {
     if (err instanceof AppError) throw err;
-    res.status(500).json({ success: false, error: "Failed to list meetings" });
+    res.status(500).json({ error: "server_error", message: "Failed to list meetings" });
   }
 });
 
@@ -139,12 +139,12 @@ legacyMeetingRoutes.post("/", async (req: Request, res: Response) => {
     const wid = await defaultWorkspace(req.user!.id);
     const { title } = req.body;
     if (!title || typeof title !== "string") {
-      res.status(400).json({ success: false, error: "Title is required" });
+      res.status(400).json({ error: "validation_error", message: "Title is required" });
       return;
     }
 
     const meeting = await prisma.meeting.create({
-      data: { title, workspaceId: wid, status: "pending" },
+      data: { title, workspaceId: wid, createdBy: req.user!.id, status: "pending" },
     });
 
     res.status(201).json({
@@ -161,7 +161,7 @@ legacyMeetingRoutes.post("/", async (req: Request, res: Response) => {
     });
   } catch (err) {
     if (err instanceof AppError) throw err;
-    res.status(500).json({ success: false, error: "Failed to create meeting" });
+    res.status(500).json({ error: "server_error", message: "Failed to create meeting" });
   }
 });
 
@@ -174,14 +174,14 @@ legacyMeetingRoutes.get("/:id", async (req: Request, res: Response) => {
         id: String(req.params.id),
         OR: [
           { workspaceId: wid },
-          { sharedTo: { some: { workspaceId: wid } } },
+          { shares: { some: { sharedWithUserId: String(req.user!.id) } } },
         ],
       },
       include: { tasks: { orderBy: { createdAt: "desc" } } },
     });
 
     if (!meeting) {
-      res.status(404).json({ success: false, error: "Meeting not found" });
+      res.status(404).json({ error: "not_found", message: "Meeting not found" });
       return;
     }
 
@@ -199,7 +199,7 @@ legacyMeetingRoutes.get("/:id", async (req: Request, res: Response) => {
     });
   } catch (err) {
     if (err instanceof AppError) throw err;
-    res.status(500).json({ success: false, error: "Failed to get meeting" });
+    res.status(500).json({ error: "server_error", message: "Failed to get meeting" });
   }
 });
 
@@ -211,7 +211,7 @@ legacyMeetingRoutes.patch("/:id", async (req: Request, res: Response) => {
       where: { id: String(req.params.id), workspaceId: wid },
     });
     if (!meeting) {
-      res.status(404).json({ success: false, error: "Meeting not found" });
+      res.status(404).json({ error: "not_found", message: "Meeting not found" });
       return;
     }
 
@@ -219,20 +219,20 @@ legacyMeetingRoutes.patch("/:id", async (req: Request, res: Response) => {
     const data: Record<string, unknown> = {};
     if (title !== undefined) {
       if (typeof title !== "string" || !title.trim()) {
-        res.status(400).json({ success: false, error: "Invalid title" });
+        res.status(400).json({ error: "validation_error", message: "Invalid title" });
         return;
       }
       data.title = title.trim();
     }
     if (duration !== undefined) {
       if (typeof duration !== "number" || duration < 0) {
-        res.status(400).json({ success: false, error: "Invalid duration" });
+        res.status(400).json({ error: "validation_error", message: "Invalid duration" });
         return;
       }
       data.duration = Math.round(duration);
     }
     if (Object.keys(data).length === 0) {
-      res.status(400).json({ success: false, error: "No valid fields to update" });
+      res.status(400).json({ error: "validation_error", message: "No valid fields to update" });
       return;
     }
 
@@ -252,7 +252,7 @@ legacyMeetingRoutes.patch("/:id", async (req: Request, res: Response) => {
     });
   } catch (err) {
     if (err instanceof AppError) throw err;
-    res.status(500).json({ success: false, error: "Failed to update meeting" });
+    res.status(500).json({ error: "server_error", message: "Failed to update meeting" });
   }
 });
 
@@ -264,7 +264,7 @@ legacyMeetingRoutes.delete("/:id", async (req: Request, res: Response) => {
       where: { id: String(req.params.id), workspaceId: wid },
     });
     if (!meeting) {
-      res.status(404).json({ success: false, error: "Meeting not found" });
+      res.status(404).json({ error: "not_found", message: "Meeting not found" });
       return;
     }
 
@@ -276,7 +276,7 @@ legacyMeetingRoutes.delete("/:id", async (req: Request, res: Response) => {
     res.json({ success: true, data: { message: "Meeting deleted" } });
   } catch (err) {
     if (err instanceof AppError) throw err;
-    res.status(500).json({ success: false, error: "Failed to delete meeting" });
+    res.status(500).json({ error: "server_error", message: "Failed to delete meeting" });
   }
 });
 
@@ -288,11 +288,11 @@ legacyMeetingRoutes.post("/:id/audio", upload.single("audio"), async (req: Reque
       where: { id: String(req.params.id), workspaceId: wid },
     });
     if (!meeting) {
-      res.status(404).json({ success: false, error: "Meeting not found" });
+      res.status(404).json({ error: "not_found", message: "Meeting not found" });
       return;
     }
     if (!req.file) {
-      res.status(400).json({ success: false, error: "No audio file provided" });
+      res.status(400).json({ error: "validation_error", message: "No audio file provided" });
       return;
     }
 
@@ -306,7 +306,7 @@ legacyMeetingRoutes.post("/:id/audio", upload.single("audio"), async (req: Reque
     const fileSize = fs.statSync(tmpPath).size;
     if (fileSize === 0) {
       fs.unlinkSync(tmpPath);
-      res.status(400).json({ success: false, error: "Uploaded audio file is empty" });
+      res.status(400).json({ error: "validation_error", message: "Uploaded audio file is empty" });
       return;
     }
 
@@ -335,7 +335,7 @@ legacyMeetingRoutes.post("/:id/audio", upload.single("audio"), async (req: Reque
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
     console.error(`✗ Audio upload failed for meeting ${String(req.params.id)}:`, message);
-    res.status(500).json({ success: false, error: `Failed to upload audio: ${message}` });
+    res.status(500).json({ error: "server_error", message: `Failed to upload audio: ${message}` });
   }
 });
 
@@ -346,17 +346,17 @@ legacyMeetingRoutes.get("/:id/audio", async (req: Request, res: Response) => {
     const meeting = await prisma.meeting.findFirst({
       where: {
         id: String(req.params.id),
-        OR: [{ workspaceId: wid }, { sharedTo: { some: { workspaceId: wid } } }],
+        OR: [{ workspaceId: wid }, { shares: { some: { sharedWithUserId: String(req.user!.id) } } }],
       },
     });
     if (!meeting || !meeting.recordingUrl) {
-      res.status(404).json({ success: false, error: "Audio not found" });
+      res.status(404).json({ error: "not_found", message: "Audio not found" });
       return;
     }
     const storage = getStorageProvider();
     const data = await storage.read(meeting.recordingUrl);
     if (!data) {
-      res.status(404).json({ success: false, error: "Audio file not found" });
+      res.status(404).json({ error: "not_found", message: "Audio file not found" });
       return;
     }
     res.setHeader("Content-Type", getMimeType(meeting.recordingUrl));
@@ -364,7 +364,7 @@ legacyMeetingRoutes.get("/:id/audio", async (req: Request, res: Response) => {
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
     console.error(`✗ Audio download failed for meeting ${String(req.params.id)}:`, message);
-    res.status(500).json({ success: false, error: `Failed to download audio: ${message}` });
+    res.status(500).json({ error: "server_error", message: `Failed to download audio: ${message}` });
   }
 });
 
@@ -376,18 +376,18 @@ legacyMeetingRoutes.post("/:id/process", async (req: Request, res: Response) => 
       where: { id: String(req.params.id), workspaceId: wid },
     });
     if (!meeting) {
-      res.status(404).json({ success: false, error: "Meeting not found" });
+      res.status(404).json({ error: "not_found", message: "Meeting not found" });
       return;
     }
     if (!meeting.recordingUrl) {
-      res.status(400).json({ success: false, error: "No audio uploaded yet" });
+      res.status(400).json({ error: "validation_error", message: "No audio uploaded yet" });
       return;
     }
 
     const storage = getStorageProvider();
     const fileExists = await storage.exists(meeting.recordingUrl);
     if (!fileExists) {
-      res.status(400).json({ success: false, error: `Audio file "${meeting.recordingUrl}" not found in storage. Please upload again.` });
+      res.status(400).json({ error: "validation_error", message: `Audio file "${meeting.recordingUrl}" not found in storage. Please upload again.` });
       return;
     }
     if (["transcribing", "summarizing"].includes(meeting.status)) {
@@ -455,7 +455,7 @@ legacyMeetingRoutes.post("/:id/process", async (req: Request, res: Response) => 
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
     console.error(`✗ Failed to start processing for meeting ${String(req.params.id)}:`, message);
-    res.status(500).json({ success: false, error: `Failed to start processing: ${message}` });
+    res.status(500).json({ error: "server_error", message: `Failed to start processing: ${message}` });
   }
 });
 
@@ -466,13 +466,13 @@ legacyMeetingRoutes.get("/:id/transcript", async (req: Request, res: Response) =
     const meeting = await prisma.meeting.findFirst({
       where: {
         id: String(req.params.id),
-        OR: [{ workspaceId: wid }, { sharedTo: { some: { workspaceId: wid } } }],
+        OR: [{ workspaceId: wid }, { shares: { some: { sharedWithUserId: String(req.user!.id) } } }],
       },
     });
-    if (!meeting) { res.status(404).json({ success: false, error: "Meeting not found" }); return; }
+    if (!meeting) { res.status(404).json({ error: "not_found", message: "Meeting not found" }); return; }
     res.json({ success: true, data: { transcript: meeting.transcript, status: meeting.status } });
   } catch (err) {
-    res.status(500).json({ success: false, error: "Failed to get transcript" });
+    res.status(500).json({ error: "server_error", message: "Failed to get transcript" });
   }
 });
 
@@ -483,10 +483,10 @@ legacyMeetingRoutes.get("/:id/summary", async (req: Request, res: Response) => {
     const meeting = await prisma.meeting.findFirst({
       where: {
         id: String(req.params.id),
-        OR: [{ workspaceId: wid }, { sharedTo: { some: { workspaceId: wid } } }],
+        OR: [{ workspaceId: wid }, { shares: { some: { sharedWithUserId: String(req.user!.id) } } }],
       },
     });
-    if (!meeting) { res.status(404).json({ success: false, error: "Meeting not found" }); return; }
+    if (!meeting) { res.status(404).json({ error: "not_found", message: "Meeting not found" }); return; }
     res.json({
       success: true,
       data: {
@@ -497,7 +497,7 @@ legacyMeetingRoutes.get("/:id/summary", async (req: Request, res: Response) => {
       },
     });
   } catch (err) {
-    res.status(500).json({ success: false, error: "Failed to get summary" });
+    res.status(500).json({ error: "server_error", message: "Failed to get summary" });
   }
 });
 
@@ -508,17 +508,17 @@ legacyMeetingRoutes.get("/:id/tasks", async (req: Request, res: Response) => {
     const meeting = await prisma.meeting.findFirst({
       where: {
         id: String(req.params.id),
-        OR: [{ workspaceId: wid }, { sharedTo: { some: { workspaceId: wid } } }],
+        OR: [{ workspaceId: wid }, { shares: { some: { sharedWithUserId: String(req.user!.id) } } }],
       },
     });
-    if (!meeting) { res.status(404).json({ success: false, error: "Meeting not found" }); return; }
+    if (!meeting) { res.status(404).json({ error: "not_found", message: "Meeting not found" }); return; }
     const tasks = await prisma.task.findMany({
       where: { meetingId: meeting.id },
       orderBy: [{ priority: "asc" }, { createdAt: "desc" }],
     });
     res.json({ success: true, data: tasks });
   } catch (err) {
-    res.status(500).json({ success: false, error: "Failed to get tasks" });
+    res.status(500).json({ error: "server_error", message: "Failed to get tasks" });
   }
 });
 
@@ -529,19 +529,19 @@ legacyMeetingRoutes.patch("/tasks/:id", async (req: Request, res: Response) => {
     const task = await prisma.task.findUnique({
       where: { id: String(req.params.id) },
     });
-    if (!task) { res.status(404).json({ success: false, error: "Task not found" }); return; }
+    if (!task) { res.status(404).json({ error: "not_found", message: "Task not found" }); return; }
 
     // Verify user is a member of the meeting's workspace
     const meeting = await prisma.meeting.findUnique({
       where: { id: task.meetingId },
     });
-    if (!meeting) { res.status(404).json({ success: false, error: "Meeting not found" }); return; }
+    if (!meeting) { res.status(404).json({ error: "not_found", message: "Meeting not found" }); return; }
 
     const membership = await prisma.workspaceMember.findUnique({
       where: { userId_workspaceId: { userId, workspaceId: String(meeting.workspaceId) } },
     });
     if (!membership) {
-      res.status(403).json({ success: false, error: "Access denied" });
+      res.status(403).json({ error: "insufficient_permissions", message: "Access denied" });
       return;
     }
 
@@ -558,6 +558,6 @@ legacyMeetingRoutes.patch("/tasks/:id", async (req: Request, res: Response) => {
     res.json({ success: true, data: updated });
   } catch (err) {
     if (err instanceof AppError) throw err;
-    res.status(500).json({ success: false, error: "Failed to update task" });
+    res.status(500).json({ error: "server_error", message: "Failed to update task" });
   }
 });

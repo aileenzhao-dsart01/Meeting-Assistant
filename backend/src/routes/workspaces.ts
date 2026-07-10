@@ -4,7 +4,6 @@ import { requireAuth } from "../middleware/auth";
 import {
   requireWorkspaceMembership,
   requireWorkspaceAdmin,
-  requireWorkspaceOwner,
 } from "../middleware/workspace";
 import { AppError, Errors } from "../utils/errors";
 
@@ -15,7 +14,6 @@ workspaceRoutes.use(requireAuth);
 
 // ---------- Helpers ----------
 
-/** Ensure a workspace slug is unique by appending -N if needed. */
 async function uniqueSlug(base: string): Promise<string> {
   let slug = base;
   let attempt = 0;
@@ -26,11 +24,10 @@ async function uniqueSlug(base: string): Promise<string> {
   return slug;
 }
 
-function formatWorkspace(w: {
-  id: string; name: string; slug: string;
-  _count: { members: number };
-  createdAt: Date;
-}, role: string) {
+function formatWorkspace(
+  w: { id: string; name: string; slug: string; _count: { members: number }; createdAt: Date },
+  role: string,
+) {
   return {
     id: w.id,
     name: w.name,
@@ -41,52 +38,35 @@ function formatWorkspace(w: {
   };
 }
 
-function formatMember(m: {
-  id: string; role: string; createdAt: Date;
-  user: { id: string; email: string; name: string | null };
-}) {
-  return {
-    id: m.id,
-    userId: m.user.id,
-    email: m.user.email,
-    name: m.user.name,
-    role: m.role,
-    joinedAt: m.createdAt.toISOString(),
-  };
-}
-
 // ---------- GET /workspaces ----------
-// List the authenticated user's workspaces
 workspaceRoutes.get("/", async (req: Request, res: Response) => {
   try {
     const memberships = await prisma.workspaceMember.findMany({
       where: { userId: req.user!.id },
       include: {
-        workspace: {
-          include: { _count: { select: { members: true } } },
-        },
+        workspace: { include: { _count: { select: { members: true } } } },
       },
       orderBy: { workspace: { createdAt: "asc" } },
     });
 
-    const workspaces = memberships.map((m) =>
-      formatWorkspace(m.workspace, m.role)
-    );
-
-    res.json({ success: true, data: { workspaces } });
+    res.json({
+      success: true,
+      data: {
+        workspaces: memberships.map((m) => formatWorkspace(m.workspace, m.role)),
+      },
+    });
   } catch (err) {
-    console.error("✗ Failed to list workspaces:", err);
-    res.status(500).json({ success: false, error: "Failed to list workspaces" });
+    console.error(" Failed to list workspaces:", err);
+    res.status(500).json({ error: "server_error", message: "Failed to list workspaces" });
   }
 });
 
 // ---------- POST /workspaces ----------
-// Create a workspace (creator becomes owner)
 workspaceRoutes.post("/", async (req: Request, res: Response) => {
   try {
     const { name } = req.body;
     if (!name || typeof name !== "string" || !name.trim()) {
-      res.status(400).json({ success: false, error: "Workspace name is required" });
+      res.status(400).json({ error: "validation_error", message: "Workspace name is required" });
       return;
     }
 
@@ -104,7 +84,7 @@ workspaceRoutes.post("/", async (req: Request, res: Response) => {
         name: name.trim(),
         slug,
         members: {
-          create: { userId: req.user!.id, role: "owner" },
+          create: { userId: req.user!.id, role: "owner" as const },
         },
       },
       include: { _count: { select: { members: true } } },
@@ -115,8 +95,8 @@ workspaceRoutes.post("/", async (req: Request, res: Response) => {
       data: formatWorkspace(workspace, "owner"),
     });
   } catch (err) {
-    console.error("✗ Failed to create workspace:", err);
-    res.status(500).json({ success: false, error: "Failed to create workspace" });
+    console.error(" Failed to create workspace:", err);
+    res.status(500).json({ error: "server_error", message: "Failed to create workspace" });
   }
 });
 
@@ -130,17 +110,15 @@ workspaceRoutes.get(
         where: { id: String(req.params.wid) },
         include: { _count: { select: { members: true } } },
       });
-
       if (!workspace) throw Errors.notFound("Workspace not found");
-
       res.json({
         success: true,
         data: formatWorkspace(workspace, req.workspace!.role),
       });
     } catch (err) {
       if (err instanceof AppError) throw err;
-      console.error("✗ Failed to get workspace:", err);
-      res.status(500).json({ success: false, error: "Failed to get workspace" });
+      console.error(" Failed to get workspace:", err);
+      res.status(500).json({ error: "server_error", message: "Failed to get workspace" });
     }
   },
 );
@@ -154,7 +132,7 @@ workspaceRoutes.patch(
     try {
       const { name } = req.body;
       if (!name || typeof name !== "string" || !name.trim()) {
-        res.status(400).json({ success: false, error: "Workspace name is required" });
+        res.status(400).json({ error: "validation_error", message: "Workspace name is required" });
         return;
       }
 
@@ -170,8 +148,8 @@ workspaceRoutes.patch(
       });
     } catch (err) {
       if (err instanceof AppError) throw err;
-      console.error("✗ Failed to update workspace:", err);
-      res.status(500).json({ success: false, error: "Failed to update workspace" });
+      console.error(" Failed to update workspace:", err);
+      res.status(500).json({ error: "server_error", message: "Failed to update workspace" });
     }
   },
 );
@@ -180,15 +158,20 @@ workspaceRoutes.patch(
 workspaceRoutes.delete(
   "/:wid",
   requireWorkspaceMembership,
-  requireWorkspaceOwner,
+  requireWorkspaceAdmin,
   async (req: Request, res: Response) => {
     try {
+      // Only owner can delete
+      if (req.workspace?.role !== "owner") {
+        res.status(403).json({ error: "insufficient_permissions", message: "Only workspace owners can delete workspaces" });
+        return;
+      }
       await prisma.workspace.delete({ where: { id: String(req.params.wid) } });
       res.json({ success: true, data: { message: "Workspace deleted" } });
     } catch (err) {
       if (err instanceof AppError) throw err;
-      console.error("✗ Failed to delete workspace:", err);
-      res.status(500).json({ success: false, error: "Failed to delete workspace" });
+      console.error(" Failed to delete workspace:", err);
+      res.status(500).json({ error: "server_error", message: "Failed to delete workspace" });
     }
   },
 );
@@ -201,81 +184,78 @@ workspaceRoutes.get(
     try {
       const members = await prisma.workspaceMember.findMany({
         where: { workspaceId: String(req.params.wid) },
-        include: {
-          user: { select: { id: true, email: true, name: true } },
-        },
         orderBy: { createdAt: "asc" },
       });
 
+      // Note: We don't have User model anymore. Members are identified by Supabase UUID.
+      // The frontend should fetch user info from Supabase for display.
       res.json({
         success: true,
-        data: { members: members.map(formatMember) },
+        data: {
+          members: members.map((m) => ({
+            id: m.id,
+            userId: m.userId,
+            role: m.role,
+            joinedAt: m.createdAt.toISOString(),
+          })),
+        },
       });
     } catch (err) {
       if (err instanceof AppError) throw err;
-      console.error("✗ Failed to list members:", err);
-      res.status(500).json({ success: false, error: "Failed to list members" });
+      console.error(" Failed to list members:", err);
+      res.status(500).json({ error: "server_error", message: "Failed to list members" });
     }
   },
 );
 
 // ---------- POST /workspaces/:wid/members ----------
-// Add a member by email (admin+)
 workspaceRoutes.post(
   "/:wid/members",
   requireWorkspaceMembership,
   requireWorkspaceAdmin,
   async (req: Request, res: Response) => {
     try {
-      const { email, role } = req.body;
-      if (!email || typeof email !== "string") {
-        res.status(400).json({ success: false, error: "User email is required" });
+      const { userId, role } = req.body;
+      if (!userId || typeof userId !== "string") {
+        res.status(400).json({ error: "validation_error", message: "userId is required (Supabase UUID)" });
         return;
       }
 
-      const user = await prisma.user.findUnique({
-        where: { email: email.toLowerCase().trim() },
-      });
-      if (!user) {
-        res.status(404).json({ success: false, error: "No user found with this email" });
-        return;
-      }
-
-      // Check if already a member
       const existing = await prisma.workspaceMember.findUnique({
-        where: { userId_workspaceId: { userId: user.id, workspaceId: String(req.params.wid) } },
+        where: { userId_workspaceId: { userId, workspaceId: String(req.params.wid) } },
       });
       if (existing) {
-        res.status(409).json({ success: false, error: "User is already a member of this workspace" });
+        res.status(409).json({ error: "conflict", message: "User is already a member" });
         return;
       }
 
-      const memberRole = role === "admin" || role === "member" ? role : "member";
+      const memberRole = role === "admin" || role === "member" || role === "viewer" ? role : "member";
       const member = await prisma.workspaceMember.create({
         data: {
-          userId: user.id,
+          userId,
           workspaceId: String(req.params.wid),
           role: memberRole,
-        },
-        include: {
-          user: { select: { id: true, email: true, name: true } },
         },
       });
 
       res.status(201).json({
         success: true,
-        data: formatMember(member),
+        data: {
+          id: member.id,
+          userId: member.userId,
+          role: member.role,
+          joinedAt: member.createdAt.toISOString(),
+        },
       });
     } catch (err) {
       if (err instanceof AppError) throw err;
-      console.error("✗ Failed to add member:", err);
-      res.status(500).json({ success: false, error: "Failed to add member" });
+      console.error(" Failed to add member:", err);
+      res.status(500).json({ error: "server_error", message: "Failed to add member" });
     }
   },
 );
 
 // ---------- PATCH /workspaces/:wid/members/:userId ----------
-// Change member role (admin+)
 workspaceRoutes.patch(
   "/:wid/members/:userId",
   requireWorkspaceMembership,
@@ -283,12 +263,12 @@ workspaceRoutes.patch(
   async (req: Request, res: Response) => {
     try {
       const { role } = req.body;
-      if (!role || !["owner", "admin", "member"].includes(role)) {
-        res.status(400).json({ success: false, error: "Role must be owner, admin, or member" });
+      if (!role || !["owner", "admin", "member", "viewer"].includes(role)) {
+        res.status(400).json({ error: "validation_error", message: "Role must be owner, admin, member, or viewer" });
         return;
       }
 
-      // Don't allow changing the last owner's role
+      // Protect last owner
       if (role !== "owner") {
         const ownerCount = await prisma.workspaceMember.count({
           where: { workspaceId: String(req.params.wid), role: "owner" },
@@ -298,7 +278,7 @@ workspaceRoutes.patch(
             where: { userId_workspaceId: { userId: String(req.params.userId), workspaceId: String(req.params.wid) } },
           });
           if (target?.role === "owner") {
-            res.status(400).json({ success: false, error: "Cannot change the last owner's role" });
+            res.status(400).json({ error: "validation_error", message: "Cannot change the last owner's role" });
             return;
           }
         }
@@ -307,22 +287,26 @@ workspaceRoutes.patch(
       const updated = await prisma.workspaceMember.update({
         where: { userId_workspaceId: { userId: String(req.params.userId), workspaceId: String(req.params.wid) } },
         data: { role },
-        include: {
-          user: { select: { id: true, email: true, name: true } },
-        },
       });
 
-      res.json({ success: true, data: formatMember(updated) });
+      res.json({
+        success: true,
+        data: {
+          id: updated.id,
+          userId: updated.userId,
+          role: updated.role,
+          joinedAt: updated.createdAt.toISOString(),
+        },
+      });
     } catch (err) {
       if (err instanceof AppError) throw err;
-      console.error("✗ Failed to update member:", err);
-      res.status(500).json({ success: false, error: "Failed to update member" });
+      console.error(" Failed to update member:", err);
+      res.status(500).json({ error: "server_error", message: "Failed to update member" });
     }
   },
 );
 
 // ---------- DELETE /workspaces/:wid/members/:userId ----------
-// Remove a member (admin+, cannot remove self if last owner)
 workspaceRoutes.delete(
   "/:wid/members/:userId",
   requireWorkspaceMembership,
@@ -333,17 +317,16 @@ workspaceRoutes.delete(
         where: { userId_workspaceId: { userId: String(req.params.userId), workspaceId: String(req.params.wid) } },
       });
       if (!membership) {
-        res.status(404).json({ success: false, error: "Member not found" });
+        res.status(404).json({ error: "not_found", message: "Member not found" });
         return;
       }
 
-      // Prevent removing the last owner
       if (membership.role === "owner") {
         const ownerCount = await prisma.workspaceMember.count({
           where: { workspaceId: String(req.params.wid), role: "owner" },
         });
         if (ownerCount <= 1) {
-          res.status(400).json({ success: false, error: "Cannot remove the last owner" });
+          res.status(400).json({ error: "validation_error", message: "Cannot remove the last owner" });
           return;
         }
       }
@@ -355,8 +338,8 @@ workspaceRoutes.delete(
       res.json({ success: true, data: { message: "Member removed" } });
     } catch (err) {
       if (err instanceof AppError) throw err;
-      console.error("✗ Failed to remove member:", err);
-      res.status(500).json({ success: false, error: "Failed to remove member" });
+      console.error(" Failed to remove member:", err);
+      res.status(500).json({ error: "server_error", message: "Failed to remove member" });
     }
   },
 );

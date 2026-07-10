@@ -4,8 +4,8 @@ import { AppError } from "../utils/errors";
 /**
  * Global error-handling middleware.
  *
- * - Catches AppError instances and returns structured JSON with the correct status code.
- * - Catches everything else and returns a generic 500.
+ * Serialises AppError into the standard error shape:
+ *   { error: "code_snake_case", message: "Human readable" }
  *
  * Must be registered AFTER all routes (as the last middleware).
  */
@@ -17,16 +17,15 @@ export function errorHandler(
 ): void {
   if (err instanceof AppError) {
     res.status(err.statusCode).json({
-      success: false,
-      error: err.message,
-      code: err.code,
+      error: err.code,
+      message: err.message,
     });
     return;
   }
 
-  console.error(" Unhandled error:", err);
+  console.error("  Unhandled error:", err);
   res.status(500).json({
-    success: false,
-    error: "Internal server error",
+    error: "server_error",
+    message: "Internal server error",
   });
 }

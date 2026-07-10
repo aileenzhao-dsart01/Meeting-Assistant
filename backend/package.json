@@ -17,9 +17,6 @@
     "summarization",
     "marketing"
   ],
-  "prisma": {
-    "seed": "tsx prisma/seed.ts"
-  },
   "author": "",
   "license": "ISC",
   "dependencies": {

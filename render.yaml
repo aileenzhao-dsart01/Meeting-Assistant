@@ -19,10 +19,10 @@ services:
         value: deepseek-chat
       - key: LLM_PROVIDER
         value: deepseek
-      - key: JWT_SECRET
+      - key: SUPABASE_JWKS_URL
         sync: false
-      - key: JWT_EXPIRES_IN
-        value: 24h
+      - key: SUPABASE_PROJECT_REF
+        sync: false
       - key: CORS_ORIGINS
         sync: false
       - key: STT_PROVIDER

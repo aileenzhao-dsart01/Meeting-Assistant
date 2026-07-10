@@ -6,36 +6,25 @@ datasource db {
   provider = "postgresql"
 }
 
-// ── Users & Workspaces ──────────────────────────────────────────────
-
-model User {
-  id           String           @id @default(cuid())
-  email        String           @unique
-  passwordHash String
-  name         String?
-  createdAt    DateTime         @default(now())
-  updatedAt    DateTime         @updatedAt
-  memberships  WorkspaceMember[]
-}
+// ── Workspaces ─────────────────────────────────────────────────────
 
 model Workspace {
-  id             String           @id @default(cuid())
-  name           String
-  slug           String           @unique
-  createdAt      DateTime         @default(now())
-  updatedAt      DateTime         @updatedAt
-  members        WorkspaceMember[]
-  meetings       Meeting[]
-  sharedMeetings SharedMeeting[]
+  id        String           @id @default(cuid())
+  name      String
+  slug      String           @unique
+  createdAt DateTime         @default(now())
+  updatedAt DateTime         @updatedAt
+  members   WorkspaceMember[]
+  meetings  Meeting[]
 }
 
 model WorkspaceMember {
   id          String    @id @default(cuid())
-  role        String    @default("member") // owner | admin | member
+  role        String    @default("member") // owner | admin | member | viewer
   createdAt   DateTime  @default(now())
 
+  // Supabase user UUID (no relation — auth is managed by Supabase)
   userId      String
-  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   workspaceId String
   workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
@@ -43,19 +32,7 @@ model WorkspaceMember {
   @@unique([userId, workspaceId])
 }
 
-model SharedMeeting {
-  id              String    @id @default(cuid())
-  meetingId       String
-  meeting         Meeting   @relation(fields: [meetingId], references: [id], onDelete: Cascade)
-  workspaceId     String    // target workspace that can see this meeting
-  workspace       Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  sharedAt        DateTime  @default(now())
-  sharedByUserId  String?
-
-  @@unique([meetingId, workspaceId])
-}
-
-// ── Meetings & Tasks ─────────────────────────────────────────────────
+// ── Meetings & Tasks ───────────────────────────────────────────────
 
 model Meeting {
   id           String   @id @default(cuid())
@@ -72,10 +49,11 @@ model Meeting {
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
-  workspaceId String?
-  workspace   Workspace?    @relation(fields: [workspaceId], references: [id])
+  workspaceId String
+  workspace   Workspace      @relation(fields: [workspaceId], references: [id])
+  createdBy   String         // Supabase user UUID
   tasks       Task[]
-  sharedTo    SharedMeeting[]
+  shares      MeetingShare[]
 }
 
 model Task {
@@ -88,4 +66,17 @@ model Task {
   priority    String?  // high | medium | low
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
+}
+
+// ── Meeting Shares (user-level sharing for viewer access) ──────────
+
+model MeetingShare {
+  id               String   @id @default(cuid())
+  meetingId        String
+  meeting          Meeting  @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  sharedWithUserId String   // Supabase user UUID — the user who can view
+  sharedByUserId   String   // Supabase user UUID — who shared it
+  sharedAt         DateTime @default(now())
+
+  @@unique([meetingId, sharedWithUserId])
 }
