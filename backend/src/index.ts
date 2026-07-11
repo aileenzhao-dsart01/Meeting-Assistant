@@ -34,6 +34,7 @@ app.use(
       "X-LLM-Model",
       "X-LLM-Base-URL",
     ],
+    exposedHeaders: ["Content-Disposition"],
   })
 );
 app.use(express.json({ limit: "1mb" }));

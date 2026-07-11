@@ -8,32 +8,87 @@ Copy and paste the following into Lovable when creating a new project.
 Build a meeting assistant dashboard for marketing, sales, IT, and security teams.
 
 ## API Base URL
-http://localhost:3001
+https://meeting-assistant-api-rqf7.onrender.com
 
 All responses follow this exact envelope:
 - Success: { "success": true, "data": ... }
-- Error:   { "success": false, "error": "human-readable message" }
+- Error:   { "error": "snake_case_code", "message": "Human readable" }
 
 Errors are always JSON — never HTML. Read json.error on failure.
 
+## Auth
+
+Uses **Supabase Auth**. The frontend already uses Lovable Cloud (Supabase) for sign-in. Every API call must include:
+
+```typescript
+const { data: { session } } = await supabase.auth.getSession();
+const token = session?.access_token;
+
+// All fetch calls:
+fetch("https://meeting-assistant-api-rqf7.onrender.com/api/...", {
+  headers: {
+    Authorization: `Bearer ${token}`,
+    "Content-Type": "application/json",
+  },
+});
+```
+
+- No token → `401 { error: "unauthorized" }` → redirect to login
+- Unverified email → `403 { error: "email_not_verified" }`
+- Not a workspace member → `403 { error: "not_a_member" }`
+- Insufficient role → `403 { error: "insufficient_permissions" }`
+
+The old `/api/auth/login` and `/api/auth/register` endpoints are **removed** — all auth goes through Supabase.
+
 ## API Endpoints
 
-### Meetings
-- GET  /api/meetings — list (?status=complete&page=1&limit=20) — newest first
-- POST /api/meetings — create { "title": "string" } → returns full meeting
-- GET  /api/meetings/:id — full detail with transcript, summary, bulletPoints[], topics[], tasks[], duration
-- DELETE /api/meetings/:id — deletes meeting + audio file
-- POST /api/meetings/:id/audio — upload audio (multipart/form-data, field name: "audio") → 200MB max
-- GET  /api/meetings/:id/audio — download original audio file (proper Content-Type header)
-- POST /api/meetings/:id/process — starts async processing → returns 202
+### Workspaces
+- GET  /api/workspaces — list my workspaces
+- POST /api/workspaces — create { name }
+- GET  /api/workspaces/:wid — workspace details
+- GET  /api/workspaces/:wid/members — list members
+- POST /api/workspaces/:wid/members — add { userId, role? } (admin+)
 
-### Transcript & Summary
-- GET  /api/meetings/:id/transcript — { transcript, status }
-- GET  /api/meetings/:id/summary — { summary, bulletPoints, topics, status }
+### Meetings (workspace-scoped — primary API)
+- GET    /api/workspaces/:wid/meetings — list (?status=complete&page=1&limit=20)
+- POST   /api/workspaces/:wid/meetings — create { title }
+- GET    /api/workspaces/:wid/meetings/:mid — full detail (includes access: "own" | "shared")
+- PATCH  /api/workspaces/:wid/meetings/:mid — update { title?, duration? } (own only)
+- DELETE /api/workspaces/:wid/meetings/:mid — delete (own only)
+- POST   /api/workspaces/:wid/meetings/:mid/audio — upload audio (multipart, field: "audio")
+- GET    /api/workspaces/:wid/meetings/:mid/audio — download audio
+- POST   /api/workspaces/:wid/meetings/:mid/process — start processing → 202
+- GET    /api/workspaces/:wid/meetings/:mid/transcript — { transcript, status }
+- GET    /api/workspaces/:wid/meetings/:mid/summary — { summary, bulletPoints, topics, status }
+- GET    /api/workspaces/:wid/meetings/:mid/tasks — list tasks
+- PATCH  /api/workspaces/:wid/meetings/:mid/tasks/:tid — update task { status?, assignee?, priority? }
+- POST   /api/workspaces/:wid/meetings/:mid/share — share with user { userId } (admin)
+- DELETE /api/workspaces/:wid/meetings/:mid/share/:userId — unshare (admin)
+- GET    /api/workspaces/:wid/meetings/:mid/shared-with — list shares
 
-### Tasks
-- GET  /api/meetings/:id/tasks — list tasks for a meeting
-- PATCH /api/tasks/:id — update { "status": "done" } → returns updated task
+### Access Rules
+| Role   | Create | Edit/Delete Own | Edit/Delete Any | Share |
+|--------|--------|----------------|-----------------|-------|
+| owner  | ✅     | ✅             | ✅              | ✅    |
+| admin  | ✅     | ✅             | ✅              | ✅    |
+| member | ✅     | ✅             | ❌              | ❌    |
+| viewer | ❌     | ❌             | ❌              | ❌    |
+
+- Meeting responses include `access: "own"` (can edit) or `access: "shared"` (read-only)
+- Hide Edit/Delete/Upload/Process buttons when `access === "shared"`
+
+### Legacy (backward compat — requires auth)
+- GET  /api/meetings — list my default workspace meetings
+- POST /api/meetings — create { title }
+- GET  /api/meetings/:id — meeting detail
+- DELETE /api/meetings/:id — delete
+- POST /api/meetings/:id/audio — upload audio
+- GET  /api/meetings/:id/audio — download audio
+- POST /api/meetings/:id/process — start processing
+- GET  /api/meetings/:id/transcript — get transcript
+- GET  /api/meetings/:id/summary — get summary
+- GET  /api/meetings/:id/tasks — list tasks
+- PATCH /api/tasks/:id — update task
 
 ## Data Shapes
 
@@ -50,6 +105,9 @@ Meeting: {
   topics: string[] | null,
   error: string | null,
   tasks: Task[],
+  access: "own" | "shared",        // ← determines edit visibility
+  workspaceId: string,
+  createdBy: string,                // Supabase user UUID
   createdAt: string (ISO-8601),
   updatedAt: string (ISO-8601)
 }

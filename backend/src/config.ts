@@ -82,8 +82,4 @@ export const config = {
     serviceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY || "",
   },
 
-  auth: {
-    // Anonymous users are allowed through (no 401) — only protected routes reject them
-    allowAnonymous: process.env.AUTH_ALLOW_ANONYMOUS !== "false",
-  },
 } as const;

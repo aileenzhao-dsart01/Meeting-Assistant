@@ -22,19 +22,8 @@ interface JwksResponse {
   keys: Jwk[];
 }
 
-/** Convert a JWK (RSA public key) to a Node crypto.KeyObject. */
 function jwkToKey(jwk: Jwk): crypto.KeyObject {
-  const der = Buffer.from(
-    crypto.createPublicKey({
-      key: {
-        kty: jwk.kty,
-        n: jwk.n,
-        e: jwk.e,
-      },
-      format: "jwk",
-    }).export({ type: "spki", format: "der" }),
-  );
-  return crypto.createPublicKey({ key: der, format: "der", type: "spki" });
+  return crypto.createPublicKey({ key: { kty: jwk.kty, n: jwk.n, e: jwk.e }, format: "jwk" });
 }
 
 async function fetchJwks(): Promise<{ [kid: string]: crypto.KeyObject }> {
@@ -50,7 +39,6 @@ async function fetchJwks(): Promise<{ [kid: string]: crypto.KeyObject }> {
   const body = (await res.json()) as JwksResponse;
   const keys: { [kid: string]: crypto.KeyObject } = {};
   for (const jwk of body.keys) {
-    // Only use signing keys
     if (jwk.use === "sig" || !jwk.use) {
       keys[jwk.kid] = jwkToKey(jwk);
     }
@@ -70,102 +58,132 @@ interface SupabaseJwtPayload {
   iss?: string;
   exp?: number;
   iat?: number;
-  /** Present when email_confirm=true or if the user's email is confirmed */
   email_verified?: boolean;
   app_metadata?: { provider?: string; [key: string]: unknown };
   user_metadata?: { [key: string]: unknown };
 }
 
+/** Shared verification options — clock skew tolerance for Render's clock. */
+const VERIFY_OPTS: jwt.VerifyOptions = {
+  algorithms: ["RS256"] as jwt.Algorithm[],
+  clockTolerance: 60, // 60s leeway for Render container clock skew
+};
+
+/** Extract Bearer token from header (case-insensitive). */
+function extractBearerToken(header: string): string | null {
+  const match = header.match(/^Bearer\s+(.+)$/i);
+  return match ? match[1].trim() : null;
+}
+
+/** Verify a Supabase JWT and return the payload, or null if invalid. */
+async function verifySupabaseJwt(token: string): Promise<SupabaseJwtPayload | null> {
+  try {
+    const keys = await fetchJwks();
+
+    // Decode header to find the key ID
+    const headerEncoded = token.split(".")[0];
+    if (!headerEncoded) return null;
+
+    let kid: string;
+    try {
+      kid = JSON.parse(Buffer.from(headerEncoded, "base64").toString("utf-8")).kid || "";
+    } catch {
+      return null;
+    }
+
+    const key = keys[kid];
+    if (!key) return null;
+
+    const payload = jwt.verify(token, key, {
+      ...VERIFY_OPTS,
+      issuer: `https://${config.supabase.projectRef}.supabase.co/auth/v1`,
+      audience: "authenticated",
+    }) as SupabaseJwtPayload;
+
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+/** Check email verification — first from JWT claim, fallback to service-role query. */
+async function isEmailVerified(payload: SupabaseJwtPayload): Promise<boolean> {
+  // JWT claim check (most common case — Supabase includes this when email confirm is on)
+  if (payload.email_verified === true) return true;
+
+  // Fallback: query auth.users using service role key
+  if (config.supabase.serviceRoleKey && payload.sub) {
+    try {
+      const res = await fetch(
+        `${config.supabase.url}/auth/v1/admin/users/${payload.sub}`,
+        {
+          headers: {
+            apikey: config.supabase.serviceRoleKey,
+            Authorization: `Bearer ${config.supabase.serviceRoleKey}`,
+          },
+        },
+      );
+      if (res.ok) {
+        const user = await res.json() as { email_confirmed_at?: string | null };
+        return !!user.email_confirmed_at;
+      }
+    } catch {
+      // fallback silently — deny if we can't verify
+    }
+  }
+
+  return false;
+}
+
+// ── Exported middleware ────────────────────────────────────────────
+
 /**
- * requireAuth — verifies the Supabase JWT from the Authorization header.
+ * requireAuth — verifies the Supabase JWT from the Authorization header
+ * (or ?token= query param for routes that need it, like audio).
  *
- * On success attaches `req.user = { id: sub (Supabase UUID), email }`.
- * On failure sends 401 with the standard error shape.
+ * On success attaches `req.user = { id, email }`.
  */
 export async function requireAuth(
   req: Request,
   res: Response,
   next: NextFunction,
 ): Promise<void> {
-  const header = req.headers.authorization;
-  if (!header || !header.startsWith("Bearer ")) {
-    res.status(401).json({ error: "unauthorized", message: "Authentication required" });
-    return;
+  // Try Authorization header first, then ?token= query param
+  let token: string | null = null;
+  const authHeader = req.headers.authorization;
+  if (authHeader) {
+    token = extractBearerToken(authHeader);
   }
-
-  const token = header.slice(7).trim();
+  if (!token && req.query.token && typeof req.query.token === "string") {
+    token = req.query.token.trim();
+  }
   if (!token) {
     res.status(401).json({ error: "unauthorized", message: "Authentication required" });
     return;
   }
-
-  try {
-    // Get the JWKS keys
-    let keys: { [kid: string]: crypto.KeyObject };
-    try {
-      keys = await fetchJwks();
-    } catch {
-      res.status(500).json({ error: "server_error", message: "Failed to fetch auth keys" });
-      return;
-    }
-
-    // Decode header to find the key ID
-    const headerEncoded = token.split(".")[0];
-    if (!headerEncoded) {
-      res.status(401).json({ error: "unauthorized", message: "Invalid token" });
-      return;
-    }
-
-    let kid: string;
-    try {
-      const decodedHeader = JSON.parse(
-        Buffer.from(headerEncoded, "base64").toString("utf-8"),
-      ) as { kid?: string; alg?: string };
-      kid = decodedHeader.kid || "";
-    } catch {
-      res.status(401).json({ error: "unauthorized", message: "Invalid token header" });
-      return;
-    }
-
-    const key = keys[kid];
-    if (!key) {
-      res.status(401).json({ error: "unauthorized", message: "Invalid token key" });
-      return;
-    }
-
-    // Verify the token
-    const payload = jwt.verify(token, key, {
-      algorithms: ["RS256"],
-      issuer: `https://${config.supabase.projectRef}.supabase.co/auth/v1`,
-      audience: "authenticated",
-    }) as SupabaseJwtPayload;
-
-    // Check email verification
-    if (!payload.email_verified) {
-      res.status(403).json({
-        error: "email_not_verified",
-        message: "Email not verified",
-      });
-      return;
-    }
-
-    req.user = {
-      id: payload.sub,
-      email: payload.email || "",
-    };
-
-    next();
-  } catch (err) {
-    if (err instanceof jwt.TokenExpiredError) {
-      res.status(401).json({ error: "unauthorized", message: "Token expired" });
-      return;
-    }
-    if (err instanceof jwt.JsonWebTokenError) {
-      res.status(401).json({ error: "unauthorized", message: "Invalid token" });
-      return;
-    }
-    res.status(500).json({ error: "server_error", message: "Authentication failed" });
+  if (token.length < 10) {
+    res.status(401).json({ error: "unauthorized", message: "Invalid token" });
+    return;
   }
+
+  const payload = await verifySupabaseJwt(token);
+  if (!payload) {
+    res.status(401).json({ error: "unauthorized", message: "Invalid or expired token" });
+    return;
+  }
+
+  // Check email verification
+  const verified = await isEmailVerified(payload);
+  if (!verified) {
+    res.status(403).json({
+      error: "email_not_verified",
+      message: "Email not verified. Please check your inbox.",
+    });
+    return;
+  }
+
+  req.user = { id: payload.sub, email: payload.email || "" };
+  next();
 }
 
 /**
@@ -178,53 +196,20 @@ export async function optionalAuth(
   next: NextFunction,
 ): Promise<void> {
   const header = req.headers.authorization;
-  if (!header || !header.startsWith("Bearer ")) {
+  if (!header) {
     next();
     return;
   }
 
-  const token = header.slice(7).trim();
+  const token = extractBearerToken(header);
   if (!token) {
     next();
     return;
   }
 
-  try {
-    const keys = await fetchJwks();
-    const headerEncoded = token.split(".")[0];
-    if (!headerEncoded) {
-      next();
-      return;
-    }
-
-    let kid: string;
-    try {
-      const decodedHeader = JSON.parse(
-        Buffer.from(headerEncoded, "base64").toString("utf-8"),
-      ) as { kid?: string };
-      kid = decodedHeader.kid || "";
-    } catch {
-      next();
-      return;
-    }
-
-    const key = keys[kid];
-    if (!key) {
-      next();
-      return;
-    }
-
-    const payload = jwt.verify(token, key, {
-      algorithms: ["RS256"],
-      issuer: `https://${config.supabase.projectRef}.supabase.co/auth/v1`,
-      audience: "authenticated",
-    }) as SupabaseJwtPayload;
-
-    if (payload.email_verified) {
-      req.user = { id: payload.sub, email: payload.email || "" };
-    }
-  } catch {
-    // Silently ignore invalid tokens
+  const payload = await verifySupabaseJwt(token);
+  if (payload) {
+    req.user = { id: payload.sub, email: payload.email || "" };
   }
   next();
 }
