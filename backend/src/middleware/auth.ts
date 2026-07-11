@@ -32,14 +32,28 @@ function jwkToKey(jwk: Jwk): crypto.KeyObject {
   return crypto.createPublicKey({ key: jwk as any, format: "jwk" });
 }
 
+/** Decode a JWT-safe base64url string, falling back to plain base64. */
+function base64urlDecode(str: string): string {
+  try {
+    return Buffer.from(str, "base64url").toString("utf-8");
+  } catch {
+    try {
+      // Fallback: standard base64 (Node < 15.7 compat)
+      return Buffer.from(str, "base64").toString("utf-8");
+    } catch {
+      return "";
+    }
+  }
+}
+
 /** Fetch JWKS for a given issuer URL. Cached per issuer for CACHE_TTL ms. */
 async function fetchJwksForIssuer(issuerUrl: string): Promise<{ [kid: string]: crypto.KeyObject } | null> {
   const now = Date.now();
   const cached = jwksCache.get(issuerUrl);
   if (cached && now - cached.fetchedAt < CACHE_TTL) return cached.keys;
 
-  // Derive JWKS URL from issuer (iss/auth/v1 → iss/.well-known/jwks.json)
-  const jwksUrl = issuerUrl.replace(/\/auth\/v1$/, "") + "/.well-known/jwks.json";
+  // JWKS is at {iss}/.well-known/jwks.json — issuer already ends with /auth/v1
+  const jwksUrl = issuerUrl + "/.well-known/jwks.json";
 
   try {
     const res = await fetch(jwksUrl, { signal: AbortSignal.timeout(5000) });
@@ -86,7 +100,9 @@ function decodeUnverified(token: string): SupabaseJwtPayload | null {
   try {
     const parts = token.split(".");
     if (parts.length !== 3) return null;
-    return JSON.parse(Buffer.from(parts[1], "base64url").toString("utf-8")) as SupabaseJwtPayload;
+    const json = base64urlDecode(parts[1]);
+    if (!json) return null;
+    return JSON.parse(json) as SupabaseJwtPayload;
   } catch {
     return null;
   }
@@ -99,32 +115,56 @@ function decodeUnverified(token: string): SupabaseJwtPayload | null {
 async function verifySupabaseJwt(token: string): Promise<SupabaseJwtPayload | null> {
   // Decode without verification first to read the issuer
   const unverified = decodeUnverified(token);
-  if (!unverified || !unverified.iss) return null;
+  if (!unverified) {
+    console.error("  AUTH: cannot decode JWT payload");
+    return null;
+  }
+  if (!unverified.iss) {
+    console.error("  AUTH: JWT has no iss claim");
+    return null;
+  }
+
+  console.error(`  AUTH: JWT iss = ${unverified.iss}`);
 
   // Fetch JWKS for this issuer
   const keys = await fetchJwksForIssuer(unverified.iss);
-  if (!keys) return null;
+  if (!keys) {
+    console.error(`  AUTH: failed to fetch keys for ${unverified.iss}`);
+    return null;
+  }
 
   // Find key ID from token header
   const parts = token.split(".");
   let kid: string;
   try {
-    kid = JSON.parse(Buffer.from(parts[0], "base64url").toString("utf-8")).kid || "";
+    const headerJson = base64urlDecode(parts[0]);
+    if (!headerJson) {
+      console.error("  AUTH: cannot decode JWT header (empty)");
+      return null;
+    }
+    kid = JSON.parse(headerJson).kid || "";
+    console.error(`  AUTH: JWT kid = ${kid}, available keys = ${Object.keys(keys).join(", ")}`);
   } catch {
+    console.error("  AUTH: cannot parse JWT header JSON");
     return null;
   }
 
   const key = keys[kid];
-  if (!key) return null;
+  if (!key) {
+    console.error(`  AUTH: key not found for kid "${kid}"`);
+    return null;
+  }
 
-  // Verify signature + expiry only. No issuer/audience check — already validated
-  // by fetching JWKS from the issuer itself.
+  // Verify signature + expiry only
   try {
-    return jwt.verify(token, key, {
+    const payload = jwt.verify(token, key, {
       algorithms: ["RS256", "ES256"],
       clockTolerance: 60,
     } as jwt.VerifyOptions) as SupabaseJwtPayload;
-  } catch {
+    console.error(`  AUTH: verification OK for user ${payload.sub}`);
+    return payload;
+  } catch (verifyErr) {
+    console.error(`  AUTH: jwt.verify failed:`, verifyErr instanceof Error ? verifyErr.message : verifyErr);
     return null;
   }
 }
