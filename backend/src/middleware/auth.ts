@@ -100,17 +100,13 @@ async function verifySupabaseJwt(token: string): Promise<SupabaseJwtPayload | nu
     const key = keys[kid];
     if (!key) return null;
 
-    // Build issuer from project ref (or skip check if not available)
-    const opts: jwt.VerifyOptions = {
-      algorithms: ["RS256", "ES256"] as jwt.Algorithm[],
+    // Verify signature + expiry only. Skip issuer + audience checks:
+    // frontend's Supabase project (Lovable Cloud) may differ from backend's
+    // SUPABASE_URL, and Supabase JWT `aud` varies across setups.
+    return jwt.verify(token, key, {
+      algorithms: ["RS256", "ES256"],
       clockTolerance: 60,
-    };
-    if (config.supabase.projectRef) {
-      opts.issuer = `https://${config.supabase.projectRef}.supabase.co/auth/v1`;
-    }
-    opts.audience = "authenticated";
-
-    return jwt.verify(token, key, opts) as SupabaseJwtPayload;
+    } as jwt.VerifyOptions) as SupabaseJwtPayload;
   } catch (err) {
     if (err instanceof jwt.TokenExpiredError) return null;
     if (err instanceof jwt.JsonWebTokenError) return null;
