@@ -1,6 +1,6 @@
 import express from "express";
 import cors from "cors";
-import { config } from "./config";
+import { config, logConfig } from "./config";
 import { prisma } from "./db";
 import { workspaceRoutes } from "./routes/workspaces";
 import { meetingRoutes } from "./routes/meetings";
@@ -65,6 +65,7 @@ async function main() {
     console.log(` Server running at http://${config.host}:${config.port}`);
     console.log(` LLM provider: ${config.llm.provider}`);
     console.log(` CORS origins: ${config.cors.origins.join(", ")}`);
+    logConfig();
   });
 }
 

@@ -3,6 +3,16 @@ import path from "path";
 
 dotenv.config({ path: path.resolve(__dirname, "..", ".env") });
 
+// ── Derive Supabase project ref from SUPABASE_URL if not explicitly set ──
+function deriveProjectRef(url: string): string {
+  const match = url.match(/https:\/\/(.+)\.supabase\.co/);
+  return match ? match[1] : "";
+}
+
+const supabaseUrl = process.env.SUPABASE_URL || "";
+const explicitRef = process.env.SUPABASE_PROJECT_REF || "";
+const projectRef = explicitRef || deriveProjectRef(supabaseUrl);
+
 export const config = {
   port: parseInt(process.env.PORT || "3001", 10),
   host: process.env.HOST || "0.0.0.0",
@@ -16,46 +26,31 @@ export const config = {
   },
 
   audio: {
-    storagePath: path.resolve(
-      __dirname,
-      "..",
-      process.env.AUDIO_STORAGE_PATH || "./audio"
-    ),
+    storagePath: path.resolve(__dirname, "..", process.env.AUDIO_STORAGE_PATH || "./audio"),
   },
 
   storage: {
-    // "local" or "supabase" — local files are lost on Render restarts
-    provider: process.env.STORAGE_PROVIDER || "local",
+    provider: (process.env.STORAGE_PROVIDER || "local") as "local" | "supabase",
     supabase: {
-      url: process.env.SUPABASE_URL || "",
+      url: supabaseUrl,
       serviceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY || "",
       bucket: process.env.SUPABASE_STORAGE_BUCKET || "meeting-audio",
     },
   },
 
   stt: {
-    // "local" = faster-whisper (Python), "deepgram" = Deepgram Nova-3 (cloud)
     provider: process.env.STT_PROVIDER || "local",
     deepgram: {
       apiKey: process.env.DEEPGRAM_API_KEY || "",
       model: process.env.STT_DEEPGRAM_MODEL || "nova-3",
-      // Comma-separated keyterms to boost (speaker names, jargon, brand terms)
-      // Each term can have a weight: "term:weight" — higher weight = more bias
-      // Example: "Ran Zhao:5,PPC:3,ROAS:3,LinkedIn Ads:2"
       keywords: process.env.DEEPGRAM_KEYWORDS || "",
-      // Strip filler words (um, uh, like, you know) from transcript
       filterFiller: process.env.DEEPGRAM_FILTER_FILLER !== "false",
     },
   },
 
   audioNormalization: {
     enabled: process.env.AUDIO_NORMALIZE !== "false",
-    // Target loudness in dB (LUFS). -16 to -14 is typical for speech.
     targetLoudness: parseFloat(process.env.AUDIO_TARGET_LOUDNESS || "-14"),
-    // Audio clarity enhancement:
-    // "basic"   = rumble removal + volume boost (fast, safe)
-    // "speech"  = basic + speech-band EQ (recommended — no voice distortion)
-    // "max"     = speech + gentle compression (for very quiet recordings)
     clarityMode: process.env.AUDIO_CLARITY_MODE || "speech",
   },
 
@@ -73,13 +68,28 @@ export const config = {
       .map((s) => s.trim()),
   },
 
+  // ── Supabase Auth — single source of truth from SUPABASE_URL ──
   supabase: {
-    url: process.env.SUPABASE_URL || "",
+    url: supabaseUrl,
+
+    // JWKS URL derived automatically from SUPABASE_URL
     jwksUrl:
       process.env.SUPABASE_JWKS_URL ||
-      `${process.env.SUPABASE_URL}/auth/v1/.well-known/jwks.json`,
-    projectRef: process.env.SUPABASE_PROJECT_REF || "",
+      (supabaseUrl ? `${supabaseUrl}/auth/v1/.well-known/jwks.json` : ""),
+
+    // Project ref derived automatically from SUPABASE_URL
+    projectRef,
+
     serviceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY || "",
   },
+};
 
-} as const;
+// ── Startup diagnostics ──
+export function logConfig(): void {
+  console.log("  Config:");
+  console.log(`    SUPABASE_URL:       ${config.supabase.url || "(not set)"}`);
+  console.log(`    SUPABASE_PROJECT_REF: ${config.supabase.projectRef || "(not set — derived from URL)"}`);
+  console.log(`    SUPABASE_JWKS_URL:  ${config.supabase.jwksUrl || "(not set)"}`);
+  console.log(`    Service role key:   ${config.supabase.serviceRoleKey ? "(set)" : "(not set)"}`);
+  console.log(`    Email verify check: ${config.supabase.serviceRoleKey ? "enabled" : "JWT claim only"}`);
+}
