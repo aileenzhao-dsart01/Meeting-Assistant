@@ -9,11 +9,24 @@ let cachedKeys: { [kid: string]: crypto.KeyObject } | null = null;
 let lastFetch = 0;
 const CACHE_TTL = 600_000; // 10 min
 
-interface Jwk { kty: string; kid: string; n: string; e: string; alg?: string; use?: string; }
+interface Jwk {
+  kty?: string;
+  kid?: string;
+  use?: string;
+  alg?: string;
+  n?: string;
+  e?: string;
+  crv?: string;
+  x?: string;
+  y?: string;
+  key_ops?: string[];
+}
+
 interface JwksResponse { keys: Jwk[]; }
 
 function jwkToKey(jwk: Jwk): crypto.KeyObject {
-  return crypto.createPublicKey({ key: { kty: jwk.kty, n: jwk.n, e: jwk.e }, format: "jwk" });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return crypto.createPublicKey({ key: jwk as any, format: "jwk" });
 }
 
 async function fetchJwks(): Promise<{ [kid: string]: crypto.KeyObject } | null> {
@@ -35,7 +48,9 @@ async function fetchJwks(): Promise<{ [kid: string]: crypto.KeyObject } | null> 
     const body = await res.json() as JwksResponse;
     const keys: { [kid: string]: crypto.KeyObject } = {};
     for (const jwk of body.keys) {
-      if (jwk.use === "sig" || !jwk.use) keys[jwk.kid] = jwkToKey(jwk);
+      if (jwk.use === "sig" || !jwk.use) {
+        keys[jwk.kid || ""] = jwkToKey(jwk);
+      }
     }
     cachedKeys = keys;
     lastFetch = now;
@@ -87,7 +102,7 @@ async function verifySupabaseJwt(token: string): Promise<SupabaseJwtPayload | nu
 
     // Build issuer from project ref (or skip check if not available)
     const opts: jwt.VerifyOptions = {
-      algorithms: ["RS256"] as jwt.Algorithm[],
+      algorithms: ["RS256", "ES256"] as jwt.Algorithm[],
       clockTolerance: 60,
     };
     if (config.supabase.projectRef) {
