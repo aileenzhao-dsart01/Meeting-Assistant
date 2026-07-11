@@ -115,39 +115,11 @@ async function verifySupabaseJwt(token: string): Promise<SupabaseJwtPayload | nu
   }
 }
 
-/** Check email verification. Trusts JWT claim first; uses service-role API if available.
- *  Never throws — returns true on uncertainty so auth doesn't block genuine users. */
-async function isEmailVerified(payload: SupabaseJwtPayload): Promise<boolean> {
-  // Fast path: JWT claim already has email_verified
-  if (payload.email_verified === true) return true;
-
-  // If no service role key, trust the JWT claim and let through
-  if (!config.supabase.serviceRoleKey || !config.supabase.url) return true;
-
-  // Fallback: query auth.users via service role API
-  try {
-    const res = await fetch(
-      `${config.supabase.url}/auth/v1/admin/users/${payload.sub}`,
-      {
-        headers: {
-          apikey: config.supabase.serviceRoleKey,
-          Authorization: `Bearer ${config.supabase.serviceRoleKey}`,
-        },
-        signal: AbortSignal.timeout(3000),
-      },
-    );
-    if (res.ok) {
-      const user = await res.json() as { email_confirmed_at?: string | null };
-      return !!user.email_confirmed_at;
-    }
-    // API failed (wrong key, wrong URL, permissions) — log and let through
-    console.error(`  AUTH: Email verification API returned ${res.status} — allowing access based on JWT claim`);
-    return true;
-  } catch {
-    // Network error — allow access rather than blocking everyone
-    console.error("  AUTH: Email verification API unreachable — allowing access based on JWT claim");
-    return true;
-  }
+/** Check email verification. Trusts the JWT claim. No service-role fallback —
+ *  the JWT's `email_verified` is set by Supabase Auth and is authoritative.
+ *  If the claim is missing/absent, we allow access (dev mode / non-critical). */
+function isEmailVerified(payload: SupabaseJwtPayload): boolean {
+  return payload.email_verified !== false;
 }
 
 // ── Exported middleware ────────────────────────────────────────────
@@ -194,7 +166,7 @@ export async function requireAuth(
     }
 
     // ── Email verification ──
-    const verified = await isEmailVerified(payload);
+    const verified = isEmailVerified(payload);
     if (!verified) {
       res.status(403).json({
         error: "email_not_verified",
