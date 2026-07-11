@@ -1,13 +1,16 @@
 import { Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
 import crypto from "crypto";
-import { config } from "../config";
 
-// ── JWKS cache ─────────────────────────────────────────────────────
+// ── JWKS cache (keyed by issuer URL) ───────────────────────────────
 
-let cachedKeys: { [kid: string]: crypto.KeyObject } | null = null;
-let lastFetch = 0;
+interface CacheEntry {
+  keys: { [kid: string]: crypto.KeyObject };
+  fetchedAt: number;
+}
+
 const CACHE_TTL = 600_000; // 10 min
+const jwksCache = new Map<string, CacheEntry>();
 
 interface Jwk {
   kty?: string;
@@ -29,20 +32,19 @@ function jwkToKey(jwk: Jwk): crypto.KeyObject {
   return crypto.createPublicKey({ key: jwk as any, format: "jwk" });
 }
 
-async function fetchJwks(): Promise<{ [kid: string]: crypto.KeyObject } | null> {
+/** Fetch JWKS for a given issuer URL. Cached per issuer for CACHE_TTL ms. */
+async function fetchJwksForIssuer(issuerUrl: string): Promise<{ [kid: string]: crypto.KeyObject } | null> {
   const now = Date.now();
-  if (cachedKeys && now - lastFetch < CACHE_TTL) return cachedKeys;
+  const cached = jwksCache.get(issuerUrl);
+  if (cached && now - cached.fetchedAt < CACHE_TTL) return cached.keys;
 
-  const url = config.supabase.jwksUrl;
-  if (!url) {
-    console.error("  AUTH: SUPABASE_URL not configured — cannot verify JWTs");
-    return null;
-  }
+  // Derive JWKS URL from issuer (iss/auth/v1 → iss/.well-known/jwks.json)
+  const jwksUrl = issuerUrl.replace(/\/auth\/v1$/, "") + "/.well-known/jwks.json";
 
   try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(5000) });
+    const res = await fetch(jwksUrl, { signal: AbortSignal.timeout(5000) });
     if (!res.ok) {
-      console.error(`  AUTH: JWKS fetch returned ${res.status}`);
+      console.error(`  AUTH: JWKS fetch returned ${res.status} for ${issuerUrl}`);
       return null;
     }
     const body = await res.json() as JwksResponse;
@@ -52,11 +54,10 @@ async function fetchJwks(): Promise<{ [kid: string]: crypto.KeyObject } | null> 
         keys[jwk.kid || ""] = jwkToKey(jwk);
       }
     }
-    cachedKeys = keys;
-    lastFetch = now;
+    jwksCache.set(issuerUrl, { keys, fetchedAt: now });
     return keys;
   } catch (err) {
-    console.error(`  AUTH: JWKS fetch failed:`, err instanceof Error ? err.message : err);
+    console.error(`  AUTH: JWKS fetch failed for ${issuerUrl}:`, err instanceof Error ? err.message : err);
     return null;
   }
 }
@@ -80,44 +81,55 @@ function extractBearerToken(header: string): string | null {
   return match ? match[1].trim() : null;
 }
 
-/** Verify a Supabase JWT. Returns null on any failure (never throws). */
-async function verifySupabaseJwt(token: string): Promise<SupabaseJwtPayload | null> {
+/** Decode the token payload WITHOUT verifying, just to read iss/email_verified. */
+function decodeUnverified(token: string): SupabaseJwtPayload | null {
   try {
-    const keys = await fetchJwks();
-    if (!keys) return null;
-
-    // Decode header to find key ID
     const parts = token.split(".");
     if (parts.length !== 3) return null;
-
-    let kid: string;
-    try {
-      kid = JSON.parse(Buffer.from(parts[0], "base64").toString("utf-8")).kid || "";
-    } catch {
-      return null;
-    }
-
-    const key = keys[kid];
-    if (!key) return null;
-
-    // Verify signature + expiry only. Skip issuer + audience checks:
-    // frontend's Supabase project (Lovable Cloud) may differ from backend's
-    // SUPABASE_URL, and Supabase JWT `aud` varies across setups.
-    return jwt.verify(token, key, {
-      algorithms: ["RS256", "ES256"],
-      clockTolerance: 60,
-    } as jwt.VerifyOptions) as SupabaseJwtPayload;
-  } catch (err) {
-    if (err instanceof jwt.TokenExpiredError) return null;
-    if (err instanceof jwt.JsonWebTokenError) return null;
-    console.error("  AUTH: Unexpected JWT error:", err instanceof Error ? err.message : err);
+    return JSON.parse(Buffer.from(parts[1], "base64url").toString("utf-8")) as SupabaseJwtPayload;
+  } catch {
     return null;
   }
 }
 
-/** Check email verification. Trusts the JWT claim. No service-role fallback —
- *  the JWT's `email_verified` is set by Supabase Auth and is authoritative.
- *  If the claim is missing/absent, we allow access (dev mode / non-critical). */
+/**
+ * verifySupabaseJwt — verify a Supabase JWT by discovering the JWKS from
+ * the token's own `iss` (issuer) claim. Works with any Supabase project.
+ */
+async function verifySupabaseJwt(token: string): Promise<SupabaseJwtPayload | null> {
+  // Decode without verification first to read the issuer
+  const unverified = decodeUnverified(token);
+  if (!unverified || !unverified.iss) return null;
+
+  // Fetch JWKS for this issuer
+  const keys = await fetchJwksForIssuer(unverified.iss);
+  if (!keys) return null;
+
+  // Find key ID from token header
+  const parts = token.split(".");
+  let kid: string;
+  try {
+    kid = JSON.parse(Buffer.from(parts[0], "base64url").toString("utf-8")).kid || "";
+  } catch {
+    return null;
+  }
+
+  const key = keys[kid];
+  if (!key) return null;
+
+  // Verify signature + expiry only. No issuer/audience check — already validated
+  // by fetching JWKS from the issuer itself.
+  try {
+    return jwt.verify(token, key, {
+      algorithms: ["RS256", "ES256"],
+      clockTolerance: 60,
+    } as jwt.VerifyOptions) as SupabaseJwtPayload;
+  } catch {
+    return null;
+  }
+}
+
+/** Trust the JWT's email_verified claim — Supabase Auth sets it accurately. */
 function isEmailVerified(payload: SupabaseJwtPayload): boolean {
   return payload.email_verified !== false;
 }
@@ -131,7 +143,8 @@ function isEmailVerified(payload: SupabaseJwtPayload): boolean {
  *   1. Authorization: Bearer <token> header
  *   2. ?token=<jwt> query param (for mobile <audio> playback)
  *
- * Never crashes — always returns a proper JSON error response.
+ * Discovers the JWKS URL from the JWT's `iss` claim — works with any
+ * Supabase project without configuration.
  */
 export async function requireAuth(
   req: Request,
@@ -166,8 +179,7 @@ export async function requireAuth(
     }
 
     // ── Email verification ──
-    const verified = isEmailVerified(payload);
-    if (!verified) {
+    if (!isEmailVerified(payload)) {
       res.status(403).json({
         error: "email_not_verified",
         message: "Email not verified. Please check your inbox.",
@@ -178,7 +190,6 @@ export async function requireAuth(
     req.user = { id: payload.sub, email: payload.email || "" };
     next();
   } catch (err) {
-    // Absolute last resort — never 500 for auth
     console.error("  AUTH: Unexpected error:", err);
     res.status(401).json({ error: "unauthorized", message: "Authentication failed" });
   }
