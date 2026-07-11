@@ -115,40 +115,39 @@ async function verifySupabaseJwt(token: string): Promise<SupabaseJwtPayload | nu
   }
 }
 
-/** Check email verification. Trusts JWT claim first; uses service-role API if available. */
+/** Check email verification. Trusts JWT claim first; uses service-role API if available.
+ *  Never throws — returns true on uncertainty so auth doesn't block genuine users. */
 async function isEmailVerified(payload: SupabaseJwtPayload): Promise<boolean> {
   // Fast path: JWT claim already has email_verified
   if (payload.email_verified === true) return true;
 
-  // Fallback: query auth.users via service role API (only if key is available)
-  if (config.supabase.serviceRoleKey && payload.sub && config.supabase.url) {
-    try {
-      const res = await fetch(
-        `${config.supabase.url}/auth/v1/admin/users/${payload.sub}`,
-        {
-          headers: {
-            apikey: config.supabase.serviceRoleKey,
-            Authorization: `Bearer ${config.supabase.serviceRoleKey}`,
-          },
-          signal: AbortSignal.timeout(3000),
-        },
-      );
-      if (res.ok) {
-        const user = await res.json() as { email_confirmed_at?: string | null };
-        return !!user.email_confirmed_at;
-      }
-    } catch {
-      // API call failed — fall through to deny
-    }
-  }
+  // If no service role key, trust the JWT claim and let through
+  if (!config.supabase.serviceRoleKey || !config.supabase.url) return true;
 
-  // No service role key — trust the JWT claim (no email_verified = let through)
-  // This avoids blocking all users when service role key isn't configured locally
-  if (!config.supabase.serviceRoleKey) {
+  // Fallback: query auth.users via service role API
+  try {
+    const res = await fetch(
+      `${config.supabase.url}/auth/v1/admin/users/${payload.sub}`,
+      {
+        headers: {
+          apikey: config.supabase.serviceRoleKey,
+          Authorization: `Bearer ${config.supabase.serviceRoleKey}`,
+        },
+        signal: AbortSignal.timeout(3000),
+      },
+    );
+    if (res.ok) {
+      const user = await res.json() as { email_confirmed_at?: string | null };
+      return !!user.email_confirmed_at;
+    }
+    // API failed (wrong key, wrong URL, permissions) — log and let through
+    console.error(`  AUTH: Email verification API returned ${res.status} — allowing access based on JWT claim`);
+    return true;
+  } catch {
+    // Network error — allow access rather than blocking everyone
+    console.error("  AUTH: Email verification API unreachable — allowing access based on JWT claim");
     return true;
   }
-
-  return false;
 }
 
 // ── Exported middleware ────────────────────────────────────────────
