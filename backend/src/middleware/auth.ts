@@ -115,56 +115,33 @@ function decodeUnverified(token: string): SupabaseJwtPayload | null {
 async function verifySupabaseJwt(token: string): Promise<SupabaseJwtPayload | null> {
   // Decode without verification first to read the issuer
   const unverified = decodeUnverified(token);
-  if (!unverified) {
-    console.error("  AUTH: cannot decode JWT payload");
-    return null;
-  }
-  if (!unverified.iss) {
-    console.error("  AUTH: JWT has no iss claim");
-    return null;
-  }
-
-  console.error(`  AUTH: JWT iss = ${unverified.iss}`);
+  if (!unverified || !unverified.iss) return null;
 
   // Fetch JWKS for this issuer
   const keys = await fetchJwksForIssuer(unverified.iss);
-  if (!keys) {
-    console.error(`  AUTH: failed to fetch keys for ${unverified.iss}`);
-    return null;
-  }
+  if (!keys) return null;
 
   // Find key ID from token header
   const parts = token.split(".");
   let kid: string;
   try {
     const headerJson = base64urlDecode(parts[0]);
-    if (!headerJson) {
-      console.error("  AUTH: cannot decode JWT header (empty)");
-      return null;
-    }
+    if (!headerJson) return null;
     kid = JSON.parse(headerJson).kid || "";
-    console.error(`  AUTH: JWT kid = ${kid}, available keys = ${Object.keys(keys).join(", ")}`);
   } catch {
-    console.error("  AUTH: cannot parse JWT header JSON");
     return null;
   }
 
   const key = keys[kid];
-  if (!key) {
-    console.error(`  AUTH: key not found for kid "${kid}"`);
-    return null;
-  }
+  if (!key) return null;
 
   // Verify signature + expiry only
   try {
-    const payload = jwt.verify(token, key, {
+    return jwt.verify(token, key, {
       algorithms: ["RS256", "ES256"],
       clockTolerance: 60,
     } as jwt.VerifyOptions) as SupabaseJwtPayload;
-    console.error(`  AUTH: verification OK for user ${payload.sub}`);
-    return payload;
-  } catch (verifyErr) {
-    console.error(`  AUTH: jwt.verify failed:`, verifyErr instanceof Error ? verifyErr.message : verifyErr);
+  } catch {
     return null;
   }
 }
