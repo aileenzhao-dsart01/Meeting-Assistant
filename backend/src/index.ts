@@ -19,6 +19,7 @@ app.use(
       if (!origin) return callback(null, true);
       if (config.cors.origins.includes(origin)) return callback(null, true);
       if (
+        origin === "https://compassmeetings.com" ||
         origin.endsWith(".lovableproject.com") ||
         origin.endsWith(".lovable.app") ||
         origin.endsWith(".onrender.com")
