@@ -26,9 +26,19 @@ services:
       - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
 
-      # ── Derived from SUPABASE_URL — OVERRIDE only if different JWKS endpoint needed ──
-      # SUPABASE_JWKS_URL: https://<project>.supabase.co/auth/v1/.well-known/jwks.json
-      # SUPABASE_PROJECT_REF: <project-ref> (auto-derived from SUPABASE_URL subdomain)
+      # ── Email (SMTP) — for sending workspace invites ──
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        value: "587"
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASS
+        sync: false
+      - key: SMTP_FROM
+        value: "noreply@meeting-assistant.app"
+      - key: APP_URL
+        sync: false
 
       # ── Required for speech transcription ──
       - key: STT_PROVIDER

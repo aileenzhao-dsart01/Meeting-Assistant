@@ -6,6 +6,7 @@ import {
   requireWorkspaceAdmin,
 } from "../middleware/workspace";
 import { AppError, Errors } from "../utils/errors";
+import { sendWorkspaceInvite, isEmailConfigured } from "../services/email";
 
 export const workspaceRoutes = Router();
 
@@ -415,6 +416,20 @@ workspaceRoutes.post(
         },
       });
 
+      // Fire-and-forget email sending (don't block response)
+      const workspace = await prisma.workspace.findUnique({
+        where: { id: String(req.params.wid) },
+        select: { name: true },
+      });
+      if (workspace && isEmailConfigured()) {
+        sendWorkspaceInvite(
+          normalizedEmail,
+          invite.id,
+          workspace.name,
+          req.user!.email || "A team member",
+        ).catch((err) => console.error("  INVITE: Email send failed:", err));
+      }
+
       res.status(201).json({
         success: true,
         data: {
@@ -422,6 +437,7 @@ workspaceRoutes.post(
           email: invite.email,
           role: invite.role,
           status: invite.status,
+          emailSent: isEmailConfigured(),
           createdAt: invite.createdAt.toISOString(),
         },
       });
