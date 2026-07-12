@@ -51,7 +51,7 @@ model Meeting {
 
   workspaceId String
   workspace   Workspace      @relation(fields: [workspaceId], references: [id])
-  createdBy   String         // Supabase user UUID
+  createdBy   String?        // Supabase user UUID
   tasks       Task[]
   shares      MeetingShare[]
 }
