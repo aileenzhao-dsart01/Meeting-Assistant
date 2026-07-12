@@ -5,6 +5,7 @@ import { prisma } from "./db";
 import { workspaceRoutes } from "./routes/workspaces";
 import { meetingRoutes } from "./routes/meetings";
 import { legacyMeetingRoutes } from "./routes/legacy-meetings";
+import { userRoutes } from "./routes/me";
 import { requireAuth } from "./middleware/auth";
 import { requireWorkspaceMembership } from "./middleware/workspace";
 import { errorHandler } from "./middleware/errorHandler";
@@ -52,6 +53,9 @@ app.use("/api/workspaces/:wid/meetings", requireAuth, requireWorkspaceMembership
 
 // Legacy flat meeting routes (backward compat)
 app.use("/api/meetings", legacyMeetingRoutes);
+
+// Current user — profile, invites, etc.
+app.use("/api/me", userRoutes);
 
 // ---------- Global error handler (must be last) ----------
 app.use(errorHandler);
