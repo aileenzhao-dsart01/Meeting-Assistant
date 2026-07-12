@@ -9,6 +9,34 @@ import { AppError, Errors } from "../utils/errors";
 
 export const workspaceRoutes = Router();
 
+// ── Internal helpers ────────────────────────────────────────────
+
+/** Look up a Supabase user by email using the admin API. */
+async function lookupSupabaseUser(email: string): Promise<{ id: string; email: string } | null> {
+  const { config } = await import("../config");
+  if (config.supabase.serviceRoleKey && config.supabase.url) {
+    try {
+      const res = await fetch(
+        `${config.supabase.url}/auth/v1/admin/users?filter%5Bemail%5D=${encodeURIComponent(email)}`,
+        {
+          headers: {
+            apikey: config.supabase.serviceRoleKey,
+            Authorization: `Bearer ${config.supabase.serviceRoleKey}`,
+          },
+          signal: AbortSignal.timeout(3000),
+        },
+      );
+      if (res.ok) {
+        const data = await res.json() as { users?: { id: string; email: string }[] };
+        if (data.users && data.users.length > 0) {
+          return { id: data.users[0].id, email: data.users[0].email };
+        }
+      }
+    } catch { /* fall through */ }
+  }
+  return null;
+}
+
 // All workspace routes require authentication
 workspaceRoutes.use(requireAuth);
 
@@ -340,6 +368,216 @@ workspaceRoutes.delete(
       if (err instanceof AppError) throw err;
       console.error(" Failed to remove member:", err);
       res.status(500).json({ error: "server_error", message: "Failed to remove member" });
+    }
+  },
+);
+
+// ════════════════════════════════════════════════════════════════
+// WORKSPACE INVITES
+// ════════════════════════════════════════════════════════════════
+
+// ---------- POST /workspaces/:wid/invites ----------
+workspaceRoutes.post(
+  "/:wid/invites",
+  requireWorkspaceMembership,
+  requireWorkspaceAdmin,
+  async (req: Request, res: Response) => {
+    try {
+      const { email, role } = req.body;
+      if (!email || typeof email !== "string" || !email.includes("@")) {
+        res.status(400).json({ error: "validation_error", message: "Valid email is required" });
+        return;
+      }
+
+      const normalizedEmail = email.toLowerCase().trim();
+      const memberRole = role === "admin" || role === "member" || role === "viewer" ? role : "member";
+
+      // Check existing pending invites to avoid duplicates
+      const existing = await prisma.workspaceInvite.findFirst({
+        where: {
+          workspaceId: String(req.params.wid),
+          email: normalizedEmail,
+          status: "pending",
+        },
+      });
+      if (existing) {
+        res.status(409).json({ error: "conflict", message: "An invite is already pending for this email" });
+        return;
+      }
+
+      const invite = await prisma.workspaceInvite.create({
+        data: {
+          email: normalizedEmail,
+          role: memberRole,
+          status: "pending",
+          invitedById: req.user!.id,
+          workspaceId: String(req.params.wid),
+        },
+      });
+
+      res.status(201).json({
+        success: true,
+        data: {
+          id: invite.id,
+          email: invite.email,
+          role: invite.role,
+          status: invite.status,
+          createdAt: invite.createdAt.toISOString(),
+        },
+      });
+    } catch (err) {
+      if (err instanceof AppError) throw err;
+      console.error(" Failed to create invite:", err);
+      res.status(500).json({ error: "server_error", message: "Failed to create invite" });
+    }
+  },
+);
+
+// ---------- GET /workspaces/:wid/invites ----------
+workspaceRoutes.get(
+  "/:wid/invites",
+  requireWorkspaceMembership,
+  requireWorkspaceAdmin,
+  async (req: Request, res: Response) => {
+    try {
+      const invites = await prisma.workspaceInvite.findMany({
+        where: { workspaceId: String(req.params.wid) },
+        orderBy: { createdAt: "desc" },
+      });
+
+      res.json({
+        success: true,
+        data: {
+          invites: invites.map((i) => ({
+            id: i.id,
+            email: i.email,
+            role: i.role,
+            status: i.status,
+            invitedByUserId: i.invitedById,
+            createdAt: i.createdAt.toISOString(),
+          })),
+        },
+      });
+    } catch (err) {
+      if (err instanceof AppError) throw err;
+      console.error(" Failed to list invites:", err);
+      res.status(500).json({ error: "server_error", message: "Failed to list invites" });
+    }
+  },
+);
+
+// ---------- POST /workspaces/:wid/invites/:inviteId/accept ----------
+// Accept an invite. The user must be authenticated and their email must match.
+workspaceRoutes.post(
+  "/:wid/invites/:inviteId/accept",
+  async (req: Request, res: Response) => {
+    try {
+      const invite = await prisma.workspaceInvite.findUnique({
+        where: { id: String(req.params.inviteId) },
+      });
+
+      if (!invite || invite.status !== "pending") {
+        res.status(404).json({ error: "not_found", message: "Invite not found or already processed" });
+        return;
+      }
+
+      // The JWT email must match the invited email
+      const userEmail = (req.user?.email || "").toLowerCase().trim();
+      if (!userEmail || userEmail !== invite.email) {
+        res.status(403).json({ error: "forbidden", message: "This invite is for a different email address" });
+        return;
+      }
+
+      // Check for existing membership
+      const membership = await prisma.workspaceMember.findUnique({
+        where: { userId_workspaceId: { userId: req.user!.id, workspaceId: invite.workspaceId } },
+      });
+
+      if (membership) {
+        await prisma.workspaceInvite.update({
+          where: { id: invite.id },
+          data: { status: "accepted" },
+        });
+        res.json({ success: true, data: { message: "Already a member", workspaceId: invite.workspaceId } });
+        return;
+      }
+
+      // Create membership + mark invite accepted
+      await prisma.$transaction([
+        prisma.workspaceMember.create({
+          data: {
+            userId: req.user!.id,
+            workspaceId: invite.workspaceId,
+            role: invite.role,
+          },
+        }),
+        prisma.workspaceInvite.update({
+          where: { id: invite.id },
+          data: { status: "accepted" },
+        }),
+      ]);
+
+      res.json({ success: true, data: { message: "Invite accepted", workspaceId: invite.workspaceId } });
+    } catch (err) {
+      if (err instanceof AppError) throw err;
+      console.error(" Failed to accept invite:", err);
+      res.status(500).json({ error: "server_error", message: "Failed to accept invite" });
+    }
+  },
+);
+
+// ---------- DELETE /workspaces/:wid/invites/:inviteId ----------
+// Cancel/delete a pending invite (admin+)
+workspaceRoutes.delete(
+  "/:wid/invites/:inviteId",
+  requireWorkspaceMembership,
+  requireWorkspaceAdmin,
+  async (req: Request, res: Response) => {
+    try {
+      const invite = await prisma.workspaceInvite.findUnique({
+        where: { id: String(req.params.inviteId) },
+      });
+      if (!invite || invite.workspaceId !== String(req.params.wid)) {
+        res.status(404).json({ error: "not_found", message: "Invite not found" });
+        return;
+      }
+
+      await prisma.workspaceInvite.delete({ where: { id: invite.id } });
+      res.json({ success: true, data: { message: "Invite cancelled" } });
+    } catch (err) {
+      if (err instanceof AppError) throw err;
+      console.error(" Failed to cancel invite:", err);
+      res.status(500).json({ error: "server_error", message: "Failed to cancel invite" });
+    }
+  },
+);
+
+// ---------- POST /workspaces/:wid/resolve-email ----------
+// Given an email, return the Supabase user ID if they have an account.
+// This is used by the frontend to add members by email.
+workspaceRoutes.post(
+  "/:wid/resolve-email",
+  requireWorkspaceMembership,
+  requireWorkspaceAdmin,
+  async (req: Request, res: Response) => {
+    try {
+      const { email } = req.body;
+      if (!email || typeof email !== "string") {
+        res.status(400).json({ error: "validation_error", message: "Email is required" });
+        return;
+      }
+
+      const user = await lookupSupabaseUser(email.toLowerCase().trim());
+      if (!user) {
+        res.status(404).json({ error: "not_found", message: "No user found with this email. They need to sign up first." });
+        return;
+      }
+
+      res.json({ success: true, data: { userId: user.id, email: user.email } });
+    } catch (err) {
+      if (err instanceof AppError) throw err;
+      console.error(" Failed to resolve email:", err);
+      res.status(500).json({ error: "server_error", message: "Failed to resolve email" });
     }
   },
 );

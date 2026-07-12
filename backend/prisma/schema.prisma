@@ -16,6 +16,7 @@ model Workspace {
   updatedAt DateTime         @updatedAt
   members   WorkspaceMember[]
   meetings  Meeting[]
+  invites   WorkspaceInvite[]
 }
 
 model WorkspaceMember {
@@ -66,6 +67,21 @@ model Task {
   priority    String?  // high | medium | low
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
+}
+
+// ── Workspace Invites (email-based) ─────────────────────────────────
+
+model WorkspaceInvite {
+  id             String    @id @default(cuid())
+  email          String    // invited user's email
+  role           String    @default("member") // admin | member | viewer
+  status         String    @default("pending") // pending | accepted | declined
+  invitedById    String    // Supabase user UUID who sent the invite
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  workspaceId    String
+  workspace      Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 }
 
 // ── Meeting Shares (user-level sharing for viewer access) ──────────
