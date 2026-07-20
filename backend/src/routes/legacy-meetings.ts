@@ -312,20 +312,22 @@ legacyMeetingRoutes.post("/:id/audio", upload.single("audio"), async (req: Reque
 
     const storage = getStorageProvider();
     let savedFilename = filename;
-    let enhancedData: Buffer;
+    let targetPath = tmpPath;
     try {
       const { normalizeAudio } = await import("../services/transcription");
       const normalizedPath = normalizeAudio(tmpPath);
-      enhancedData = fs.readFileSync(normalizedPath);
+      targetPath = normalizedPath;
       savedFilename = filename.replace(/\.[^.]+$/, ".wav");
-      if (normalizedPath !== tmpPath && fs.existsSync(normalizedPath)) {
-        try { fs.unlinkSync(normalizedPath); } catch { /* ignore */ }
-      }
     } catch {
-      enhancedData = fs.readFileSync(tmpPath);
+      targetPath = tmpPath;
     }
-    await storage.save(savedFilename, enhancedData, getMimeType(savedFilename));
+    await storage.save(savedFilename, targetPath, getMimeType(savedFilename));
+
+    // Clean up temp files
     try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
+    if (targetPath !== tmpPath) {
+      try { fs.unlinkSync(targetPath); } catch { /* ignore */ }
+    }
 
     const updated = await prisma.meeting.update({
       where: { id: String(req.params.id) },

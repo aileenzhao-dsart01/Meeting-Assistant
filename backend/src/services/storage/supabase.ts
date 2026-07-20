@@ -1,3 +1,4 @@
+import { openAsBlob } from "fs";
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
 import { config } from "../../config";
 import { StorageProvider } from "./interface";
@@ -40,10 +41,12 @@ export class SupabaseStorageProvider implements StorageProvider {
     };
   }
 
-  async save(filename: string, data: Buffer, mimeType: string): Promise<string> {
+  async save(filename: string, filePath: string, mimeType: string): Promise<string> {
     // Use the Supabase JS SDK which auto-switches to TUS resumable upload
-    // for files >= 6MB — this bypasses the API gateway's 10MB request body limit
-    const { error } = await this.supabase.storage.from(this.bucket).upload(filename, data, {
+    // for files >= 6MB — this bypasses the API gateway's 10MB request body limit.
+    // openAsBlob() creates a file-backed Blob (no in-memory copy).
+    const fileBlob = await openAsBlob(filePath);
+    const { error } = await this.supabase.storage.from(this.bucket).upload(filename, fileBlob, {
       contentType: mimeType,
       upsert: true,
       cacheControl: "3600",

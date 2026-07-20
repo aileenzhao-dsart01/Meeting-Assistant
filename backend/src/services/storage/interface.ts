@@ -8,8 +8,8 @@
 export interface StorageProvider {
   readonly name: string;
 
-  /** Save a file from a buffer. Returns the filename (key) used to store it. */
-  save(filename: string, data: Buffer, mimeType: string): Promise<string>;
+  /** Save a file from a local path. Returns the filename (key) used to store it. */
+  save(filename: string, filePath: string, mimeType: string): Promise<string>;
 
   /** Read a file. Returns the data buffer, or null if not found. */
   read(filename: string): Promise<Buffer | null>;

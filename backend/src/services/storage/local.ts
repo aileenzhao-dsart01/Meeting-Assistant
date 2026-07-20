@@ -19,12 +19,12 @@ export class LocalStorageProvider implements StorageProvider {
     return path.resolve(this.basePath, filename);
   }
 
-  async save(filename: string, data: Buffer, _mimeType: string): Promise<string> {
+  async save(filename: string, filePath: string, _mimeType: string): Promise<string> {
     if (!fs.existsSync(this.basePath)) {
       fs.mkdirSync(this.basePath, { recursive: true });
     }
     const fp = this.fullPath(filename);
-    fs.writeFileSync(fp, data);
+    fs.copyFileSync(filePath, fp);
     return filename;
   }
 
