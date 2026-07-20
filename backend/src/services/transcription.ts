@@ -326,7 +326,7 @@ async function transcribeLocal(
         `python3 "${scriptPath}" "${audioPath}" "${modelSize}" "${language}" "${contextWords}"`,
         {
           timeout: 120 * 60 * 1000, // 2 hour timeout
-          maxBuffer: 50 * 1024 * 1024, // 50MB
+          maxBuffer: 200 * 1024 * 1024, // 200MB
         },
         (error, stdout, stderr) => {
           if (error) {

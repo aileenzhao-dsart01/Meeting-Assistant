@@ -64,7 +64,7 @@ const tmpStorage = multer.diskStorage({
 });
 const upload = multer({
   storage: tmpStorage,
-  limits: { fileSize: 200 * 1024 * 1024 },
+  limits: { fileSize: 500 * 1024 * 1024 },
 });
 
 // All legacy routes require auth
