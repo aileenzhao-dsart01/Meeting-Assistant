@@ -1,3 +1,4 @@
+import { createClient, SupabaseClient } from "@supabase/supabase-js";
 import { config } from "../../config";
 import { StorageProvider } from "./interface";
 
@@ -7,13 +8,24 @@ const DEFAULT_BUCKET = "meeting-audio";
  * Supabase Storage provider.
  * Files persist across deploys — ideal for Render / cloud deployments.
  * Bucket must be created first in Supabase dashboard (public read access).
+ *
+ * Large files (>6MB) are uploaded via TUS resumable upload protocol,
+ * bypassing the 10MB API gateway limit that would otherwise cause a 413 error.
  */
 export class SupabaseStorageProvider implements StorageProvider {
   readonly name = "supabase";
   private bucket: string;
+  private supabase: SupabaseClient;
 
   constructor() {
     this.bucket = config.storage.supabase.bucket || DEFAULT_BUCKET;
+    this.supabase = createClient(config.storage.supabase.url, config.storage.supabase.serviceRoleKey, {
+      auth: {
+        autoRefreshToken: false,
+        persistSession: false,
+        detectSessionInUrl: false,
+      },
+    });
   }
 
   private get baseUrl(): string {
@@ -29,19 +41,16 @@ export class SupabaseStorageProvider implements StorageProvider {
   }
 
   async save(filename: string, data: Buffer, mimeType: string): Promise<string> {
-    const resp = await fetch(`${this.baseUrl}/${filename}`, {
-      method: "POST",
-      headers: {
-        ...this.headers,
-        "Content-Type": mimeType,
-        "x-upsert": "true",
-      },
-      body: data,
+    // Use the Supabase JS SDK which auto-switches to TUS resumable upload
+    // for files >= 6MB — this bypasses the API gateway's 10MB request body limit
+    const { error } = await this.supabase.storage.from(this.bucket).upload(filename, data, {
+      contentType: mimeType,
+      upsert: true,
+      cacheControl: "3600",
     });
 
-    if (!resp.ok) {
-      const err = await resp.text().catch(() => "unknown");
-      throw new Error(`Supabase Storage upload failed (${resp.status}): ${err.substring(0, 300)}`);
+    if (error) {
+      throw new Error(`Supabase Storage upload failed: ${error.message}`);
     }
 
     return filename;
