@@ -356,7 +356,7 @@ async function transcribeLocal(
  */
 function requestLongTimeout(
   url: string,
-  init: { method?: string; headers?: Record<string, string>; body?: Buffer }
+  init: { method?: string; headers?: Record<string, string>; body?: Buffer | NodeJS.ReadableStream }
 ): Promise<Response> {
   return new Promise((resolve, reject) => {
     const parsed = new URL(url);
@@ -390,10 +390,16 @@ function requestLongTimeout(
     });
     req.on("error", reject);
 
-    if (init.body) {
+    if (Buffer.isBuffer(init.body)) {
       req.write(init.body);
+      req.end();
+    } else if (init.body) {
+      // Stream the body — backpressure is handled by pipe
+      init.body.pipe(req);
+      init.body.on("error", (err) => req.destroy(err));
+    } else {
+      req.end();
     }
-    req.end();
   });
 }
 
@@ -521,24 +527,23 @@ async function transcribeDeepgram(audioPath: string, language?: string): Promise
     searchParams.set("language", "en");
   }
 
-  const fileSizeMB = (fs.statSync(audioToSend).size / 1024 / 1024).toFixed(1);
+  const fileSize = fs.statSync(audioToSend).size;
+  const fileSizeMB = (fileSize / 1024 / 1024).toFixed(1);
   console.log(`  → Sending to Deepgram API (model: ${model}, language: ${searchParams.get("language")}, file: ${fileSizeMB} MB)...`);
 
-  const audioBuffer = fs.readFileSync(audioToSend);
-
-  // Deepgram queues long files for processing, which can take much longer than
-  // undici's default 5-minute timeout — a 60+ min meeting easily exceeds it and
-  // the request aborts. Use the long-timeout helper instead of global fetch().
+  // Stream the file body — avoids loading a multi-hundred-MB buffer into RAM
+  // (a 2h meeting would OOM on Render's 512MB instance).
+  // Content-Type must match the actual container (webm/opus, mp3), not "audio/wav".
   const response = await requestLongTimeout(
     `https://api.deepgram.com/v1/listen?${searchParams.toString()}`,
     {
       method: "POST",
       headers: {
         Authorization: `Token ${apiKey}`,
-        "Content-Type": "audio/wav",
-        "Content-Length": String(audioBuffer.length),
+        "Content-Type": getMimeType(audioToSend),
+        "Content-Length": String(fileSize),
       },
-      body: audioBuffer,
+      body: fs.createReadStream(audioToSend),
     }
   );
 

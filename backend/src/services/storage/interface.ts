@@ -5,6 +5,11 @@
  * Currently supports local disk and Supabase Storage.
  */
 
+export interface StoredStream {
+  stream: NodeJS.ReadableStream;
+  size: number;
+}
+
 export interface StorageProvider {
   readonly name: string;
 
@@ -13,6 +18,9 @@ export interface StorageProvider {
 
   /** Read a file. Returns the data buffer, or null if not found. */
   read(filename: string): Promise<Buffer | null>;
+
+  /** Stream a single stored object. Returns the stream + size, or null if not found. */
+  readStream(key: string, signal?: AbortSignal): Promise<StoredStream | null>;
 
   /** Delete a file. Returns true if deleted, false if not found. */
   delete(filename: string): Promise<boolean>;

@@ -61,10 +61,45 @@ app.use("/api/me", userRoutes);
 // ---------- Global error handler (must be last) ----------
 app.use(errorHandler);
 
+// ---------- Crash recovery ----------
+// If the server died mid-processing (deploy, OOM, Render reap), meetings can be
+// stuck in "transcribing"/"summarizing" forever. Reset them so the user can re-run.
+async function recoverInterruptedMeetings(): Promise<void> {
+  const interrupted = await prisma.meeting.findMany({
+    where: { status: { in: ["transcribing", "summarizing"] } },
+    select: { id: true },
+  });
+  if (interrupted.length > 0) {
+    await prisma.meeting.updateMany({
+      where: { id: { in: interrupted.map((m) => m.id) } },
+      data: {
+        status: "error",
+        error: "Processing was interrupted by a server restart — please re-run processing.",
+      },
+    });
+    console.log(` Recovered ${interrupted.length} interrupted meeting(s) → status "error"`);
+  }
+
+  // Meetings stuck in "uploading" (crash between save and DB update) → pending
+  const stuckUploads = await prisma.meeting.findMany({
+    where: { status: "uploading" },
+    select: { id: true },
+  });
+  if (stuckUploads.length > 0) {
+    await prisma.meeting.updateMany({
+      where: { id: { in: stuckUploads.map((m) => m.id) } },
+      data: { status: "pending" },
+    });
+    console.log(` Reset ${stuckUploads.length} stuck upload(s) → status "pending"`);
+  }
+}
+
 // ---------- Start ----------
 async function main() {
   await prisma.$connect();
   console.log(" Database connected");
+
+  await recoverInterruptedMeetings();
 
   app.listen(config.port, config.host, () => {
     console.log(` Server running at http://${config.host}:${config.port}`);

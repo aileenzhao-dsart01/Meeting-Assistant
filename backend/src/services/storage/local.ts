@@ -1,7 +1,7 @@
 import fs from "fs";
 import path from "path";
 import { config } from "../../config";
-import { StorageProvider } from "./interface";
+import { StorageProvider, StoredStream } from "./interface";
 
 /**
  * Local disk storage provider.
@@ -32,6 +32,13 @@ export class LocalStorageProvider implements StorageProvider {
     const fp = this.fullPath(filename);
     if (!fs.existsSync(fp)) return null;
     return fs.readFileSync(fp);
+  }
+
+  async readStream(key: string, _signal?: AbortSignal): Promise<StoredStream | null> {
+    const fp = this.fullPath(key);
+    if (!fs.existsSync(fp)) return null;
+    const size = fs.statSync(fp).size;
+    return { stream: fs.createReadStream(fp), size };
   }
 
   async delete(filename: string): Promise<boolean> {

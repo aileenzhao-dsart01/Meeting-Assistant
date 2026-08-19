@@ -1,7 +1,8 @@
 import { openAsBlob } from "fs";
+import { Readable } from "stream";
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
 import { config } from "../../config";
-import { StorageProvider } from "./interface";
+import { StorageProvider, StoredStream } from "./interface";
 
 const DEFAULT_BUCKET = "meeting-audio";
 
@@ -73,6 +74,26 @@ export class SupabaseStorageProvider implements StorageProvider {
 
     const arrayBuf = await resp.arrayBuffer();
     return Buffer.from(arrayBuf);
+  }
+
+  async readStream(key: string, signal?: AbortSignal): Promise<StoredStream | null> {
+    const resp = await fetch(`${this.baseUrl}/${key}`, {
+      headers: this.headers,
+      signal,
+    });
+
+    if (resp.status === 404) return null;
+    if (!resp.ok) {
+      throw new Error(
+        `Supabase Storage read failed (${resp.status}): ${(await resp.text()).substring(0, 200)}`
+      );
+    }
+
+    const size = Number(resp.headers.get("content-length") || 0);
+    const stream = resp.body
+      ? Readable.fromWeb(resp.body as any)
+      : Readable.from([]);
+    return { stream, size };
   }
 
   async delete(filename: string): Promise<boolean> {

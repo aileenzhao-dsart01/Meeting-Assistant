@@ -130,7 +130,7 @@ const tmpStorage = multer.diskStorage({
 });
 const upload = multer({
   storage: tmpStorage,
-  limits: { fileSize: 500 * 1024 * 1024 },
+  limits: { fileSize: 2 * 1024 * 1024 * 1024 },
 });
 
 // ════════════════════════════════════════════════════════════════════
@@ -365,24 +365,13 @@ meetingRoutes.post("/:mid/audio", upload.single("audio"), async (req: Request, r
     }
 
     const storage = getStorageProvider();
-    let savedFilename = filename;
-    let targetPath = tmpPath;
-    try {
-      const { normalizeAudio } = await import("../services/transcription");
-      const normalizedPath = normalizeAudio(tmpPath);
-      targetPath = normalizedPath;
-      savedFilename = filename.replace(/\.[^.]+$/, ".wav");
-    } catch {
-      targetPath = tmpPath;
-    }
 
-    await storage.save(savedFilename, targetPath, getMimeType(savedFilename));
-
-    // Clean up temp files
+    // Save the ORIGINAL compressed upload (webm/opus/mp3), not a WAV.
+    // ffmpeg isn't available on Render, and a WAV is 10-20x larger in storage.
+    // Transcription normalizes on its own during processing, so no quality loss.
+    const savedFilename = filename;
+    await storage.save(savedFilename, tmpPath, getMimeType(savedFilename));
     try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
-    if (targetPath !== tmpPath) {
-      try { fs.unlinkSync(targetPath); } catch { /* ignore */ }
-    }
 
     const updated = await prisma.meeting.update({
       where: { id: String(req.params.mid) },
@@ -413,14 +402,18 @@ meetingRoutes.get("/:mid/audio", async (req: Request, res: Response) => {
     }
 
     const storage = getStorageProvider();
-    const data = await storage.read(meeting.recordingUrl);
-    if (!data) {
+    const abort = new AbortController();
+    res.on("close", () => abort.abort()); // stop the fetch if the client disconnects
+
+    const src = await storage.readStream(meeting.recordingUrl, abort.signal);
+    if (!src) {
       res.status(404).json({ error: "not_found", message: "Audio file not found" });
       return;
     }
 
     res.setHeader("Content-Type", getMimeType(meeting.recordingUrl));
-    res.send(data);
+    if (src.size > 0) res.setHeader("Content-Length", String(src.size));
+    src.stream.pipe(res);
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
     console.error(` Audio download failed: ${message}`);
@@ -742,11 +735,19 @@ async function processMeeting(
     });
 
     const storage = getStorageProvider();
-    const audioData = await storage.read(meeting.recordingUrl!);
-    if (!audioData) throw new Error(`Audio file "${meeting.recordingUrl}" not found in storage`);
-
     audioTmpPath = path.resolve(config.audio.storagePath, `.process-${meeting.recordingUrl}`);
-    fs.writeFileSync(audioTmpPath, audioData);
+
+    // Stream the audio from storage to disk — avoids loading a multi-hundred-MB
+    // Buffer into RAM (a 2h meeting would OOM on Render's 512MB instance).
+    const src = await storage.readStream(meeting.recordingUrl!);
+    if (!src) throw new Error(`Audio file "${meeting.recordingUrl}" not found in storage`);
+    await new Promise<void>((resolve, reject) => {
+      const ws = fs.createWriteStream(audioTmpPath!);
+      src.stream.on("error", reject);
+      ws.on("error", reject);
+      ws.on("finish", resolve);
+      src.stream.pipe(ws);
+    });
 
     const { transcribeAudio } = await import("../services/transcription");
     const transcript = await transcribeAudio(audioTmpPath);
