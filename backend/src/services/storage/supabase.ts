@@ -1,6 +1,7 @@
-import { openAsBlob } from "fs";
+import fs from "fs";
+import http from "http";
+import https from "https";
 import { Readable } from "stream";
-import { createClient, SupabaseClient } from "@supabase/supabase-js";
 import { config } from "../../config";
 import { StorageProvider, StoredStream } from "./interface";
 
@@ -11,23 +12,17 @@ const DEFAULT_BUCKET = "meeting-audio";
  * Files persist across deploys — ideal for Render / cloud deployments.
  * Bucket must be created first in Supabase dashboard (public read access).
  *
- * Large files (>6MB) are uploaded via TUS resumable upload protocol,
- * bypassing the 10MB API gateway limit that would otherwise cause a 413 error.
+ * Uploads stream the file body directly to the Storage REST API via
+ * http/https (not the supabase-js SDK). The SDK wraps file Blobs in FormData,
+ * which undici buffers entirely in RAM — a 300MB upload spikes memory by
+ * ~300MB and OOM-kills a 512MB Render instance. Streaming keeps RAM flat.
  */
 export class SupabaseStorageProvider implements StorageProvider {
   readonly name = "supabase";
   private bucket: string;
-  private supabase: SupabaseClient;
 
   constructor() {
     this.bucket = config.storage.supabase.bucket || DEFAULT_BUCKET;
-    this.supabase = createClient(config.storage.supabase.url, config.storage.supabase.serviceRoleKey, {
-      auth: {
-        autoRefreshToken: false,
-        persistSession: false,
-        detectSessionInUrl: false,
-      },
-    });
   }
 
   private get baseUrl(): string {
@@ -43,19 +38,39 @@ export class SupabaseStorageProvider implements StorageProvider {
   }
 
   async save(filename: string, filePath: string, mimeType: string): Promise<string> {
-    // Use the Supabase JS SDK which auto-switches to TUS resumable upload
-    // for files >= 6MB — this bypasses the API gateway's 10MB request body limit.
-    // openAsBlob() creates a file-backed Blob (no in-memory copy).
-    const fileBlob = await openAsBlob(filePath);
-    const { error } = await this.supabase.storage.from(this.bucket).upload(filename, fileBlob, {
-      contentType: mimeType,
-      upsert: true,
-      cacheControl: "3600",
+    const size = fs.statSync(filePath).size;
+    const url = `${this.baseUrl}/${filename}`;
+
+    // Stream the file from disk to Supabase — no in-memory copy.
+    // http.ClientRequest is a Writable; pipe() handles backpressure.
+    const resp = await new Promise<http.IncomingMessage>((resolve, reject) => {
+      const parsed = new URL(url);
+      const mod = parsed.protocol === "https:" ? https : http;
+      const req = mod.request(
+        parsed,
+        {
+          method: "POST",
+          headers: {
+            ...this.headers,
+            "Content-Type": mimeType,
+            "Content-Length": String(size),
+            "Cache-Control": "max-age=3600",
+            "x-upsert": "true",
+          },
+        },
+        (res) => resolve(res)
+      );
+      req.on("error", reject);
+      fs.createReadStream(filePath).pipe(req);
     });
 
-    if (error) {
-      throw new Error(`Supabase Storage upload failed: ${error.message}`);
+    if (resp.statusCode !== 200 && resp.statusCode !== 201) {
+      const chunks: Buffer[] = [];
+      for await (const chunk of resp) chunks.push(Buffer.from(chunk));
+      const body = Buffer.concat(chunks).toString("utf8").substring(0, 300);
+      throw new Error(`Supabase Storage upload failed (${resp.statusCode}): ${body}`);
     }
+    resp.resume(); // drain the response body
 
     return filename;
   }
