@@ -127,9 +127,17 @@ export class SupabaseStorageProvider implements StorageProvider {
   }
 
   async exists(filename: string): Promise<boolean> {
-    // Supabase Storage doesn't have a HEAD endpoint, so just try reading
-    const result = await this.read(filename);
-    return result !== null;
+    // Request only the first byte instead of downloading the whole file.
+    // (read() — which buffers the entire audio into RAM — used to OOM a 512MB
+    // Render instance when the process route checked existence of a large file.)
+    const resp = await fetch(`${this.baseUrl}/${filename}`, {
+      headers: { ...this.headers, Range: "bytes=0-0" },
+    });
+
+    if (resp.status === 404) return false;
+    if (resp.status === 200 || resp.status === 206 || resp.status === 416) return true;
+    // Any other non-2xx status — treat as "can't confirm" but don't throw
+    return resp.ok;
   }
 
   /**
