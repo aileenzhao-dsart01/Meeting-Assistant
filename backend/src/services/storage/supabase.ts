@@ -61,7 +61,10 @@ export class SupabaseStorageProvider implements StorageProvider {
         (res) => resolve(res)
       );
       req.on("error", reject);
-      fs.createReadStream(filePath).pipe(req);
+      const fileStream = fs.createReadStream(filePath);
+      // Unhandled 'error' on a stream kills the process — forward it to the request
+      fileStream.on("error", (err) => req.destroy(err));
+      fileStream.pipe(req);
     });
 
     if (resp.statusCode !== 200 && resp.statusCode !== 201) {

@@ -346,7 +346,11 @@ legacyMeetingRoutes.get("/:id/audio", async (req: Request, res: Response) => {
     }
     const storage = getStorageProvider();
     const abort = new AbortController();
-    res.on("close", () => abort.abort()); // stop the fetch if the client disconnects
+    res.on("close", () => {
+      // Only abort the upstream fetch if the response didn't finish normally —
+      // a premature close means the client disconnected mid-stream.
+      if (!res.writableEnded) abort.abort();
+    });
 
     const src = await storage.readStream(meeting.recordingUrl, abort.signal);
     if (!src) {
@@ -355,11 +359,19 @@ legacyMeetingRoutes.get("/:id/audio", async (req: Request, res: Response) => {
     }
     res.setHeader("Content-Type", getMimeType(meeting.recordingUrl));
     if (src.size > 0) res.setHeader("Content-Length", String(src.size));
+
+    // Client disconnect aborts the upstream fetch, which surfaces as an
+    // AbortError on the source stream. Without a listener, that unhandled
+    // 'error' event crashes the whole process. A disconnect is normal — swallow.
+    src.stream.on("error", () => { /* client disconnected — expected */ });
+
     src.stream.pipe(res);
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
     console.error(`✗ Audio download failed for meeting ${String(req.params.id)}:`, message);
-    res.status(500).json({ error: "server_error", message: `Failed to download audio: ${message}` });
+    if (!res.headersSent && !res.writableEnded) {
+      res.status(500).json({ error: "server_error", message: `Failed to download audio: ${message}` });
+    }
   }
 });
 
