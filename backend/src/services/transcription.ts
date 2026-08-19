@@ -1,5 +1,7 @@
 import { execSync, exec } from "child_process";
 import fs from "fs";
+import http from "http";
+import https from "https";
 import path from "path";
 import { config } from "../config";
 
@@ -342,6 +344,59 @@ async function transcribeLocal(
   });
 }
 
+// ---------- Long-timeout request helper ----------
+
+/**
+ * Perform a request with a long idle timeout, suitable for transcription
+ * APIs that queue long files and take several minutes to respond.
+ *
+ * Node's global fetch() (undici) aborts after 5 minutes with no response
+ * headers, which breaks transcription of meetings > ~30 min. This uses the
+ * built-in http/https modules instead, with a generous idle timeout.
+ */
+function requestLongTimeout(
+  url: string,
+  init: { method?: string; headers?: Record<string, string>; body?: Buffer }
+): Promise<Response> {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url);
+    const mod = parsed.protocol === "https:" ? https : http;
+
+    const req = mod.request(
+      parsed,
+      {
+        method: init.method || "GET",
+        headers: init.headers,
+        timeout: 2 * 60 * 60 * 1000, // 2 hour idle timeout
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (chunk: Buffer) => chunks.push(chunk));
+        res.on("end", () => {
+          const body = Buffer.concat(chunks);
+          resolve(
+            new Response(body, {
+              status: res.statusCode || 500,
+              headers: res.headers as Record<string, string>,
+            })
+          );
+        });
+        res.on("error", reject);
+      }
+    );
+
+    req.on("timeout", () => {
+      req.destroy(new Error("Request timed out after 2 hours"));
+    });
+    req.on("error", reject);
+
+    if (init.body) {
+      req.write(init.body);
+    }
+    req.end();
+  });
+}
+
 // ---------- Cloud transcriber (Deepgram Nova-2) ----------
 
 interface DeepgramUtterance {
@@ -471,13 +526,17 @@ async function transcribeDeepgram(audioPath: string, language?: string): Promise
 
   const audioBuffer = fs.readFileSync(audioToSend);
 
-  const response = await fetch(
+  // Deepgram queues long files for processing, which can take much longer than
+  // undici's default 5-minute timeout — a 60+ min meeting easily exceeds it and
+  // the request aborts. Use the long-timeout helper instead of global fetch().
+  const response = await requestLongTimeout(
     `https://api.deepgram.com/v1/listen?${searchParams.toString()}`,
     {
       method: "POST",
       headers: {
         Authorization: `Token ${apiKey}`,
         "Content-Type": "audio/wav",
+        "Content-Length": String(audioBuffer.length),
       },
       body: audioBuffer,
     }
