@@ -351,3 +351,266 @@ This prevents OOM when multiple long meetings are submitted simultaneously.
 | `REVISE.md` | **NEW** — this file |
 | `LOVABLE_PROMPT.md` | **NEW** — prompt for Lovable UI generation |
 
+---
+
+# Recent Changes — Large Files, Streaming & Resilience (2026-07 → 2026-08)
+
+These revisions were driven by real-world production failures on Render free tier
+(512MB RAM, no ffmpeg, ephemeral disk, cold starts) once meetings grew past ~30 minutes.
+
+> **Problem:** "While I was using the meeting transcript there is one error occurred for a 34 minutes longer meeting as failed to upload Supabase Storage upload failed 400 statuscode 413 error Payload too large."
+> **Then:** "during the daytime, I noticed a backend failure… Now looks good in rendering."
+
+Each failure was traced to a specific root cause and fixed. The overarching goal became
+**stream audio end-to-end (no full-file Buffers in RAM)** and **survive crashes, restarts, and provider blips**.
+
+---
+
+## 1. Email Delivery — SMTP → SendGrid REST API
+
+> **Why:** Render free tier blocks outbound port 587, breaking SMTP-based invite emails.
+
+**File:** `src/services/email/` (SendGrid implementation replacing nodemailer SMTP)
+
+| Before | After |
+|--------|-------|
+| Nodemailer via SMTP (`host`/`port`/`user`/`pass`) | SendGrid REST API over HTTPS (`SENDGRID_API_KEY`) |
+| Port 587 — **blocked** on Render free | HTTPS 443 — works on Render free |
+
+**What it fixed:** Workspace invite emails now send from Render's free tier.
+
+---
+
+## 2. Supabase Storage — Large Upload Fixes (413 → OOM → streaming)
+
+### 2.1 The original 413 (Payload Too Large)
+
+> **Failure:** `Supabase Storage upload failed 400 statuscode 413 error Payload too large` on a 34-min meeting.
+
+**File:** `src/services/storage/supabase.ts` — `save()`
+
+| Before | After |
+|--------|-------|
+| Raw `fetch()` POST to `…/storage/v1/object/{bucket}/{file}` with the whole file as the body | `@supabase/supabase-js` SDK `storage.from(bucket).upload()` |
+
+**What it fixed:** The raw REST POST went through Supabase's API gateway (Cloudflare),
+which caps request bodies at ~10MB. The SDK uses a higher-level upload path.
+
+### 2.2 In-memory copies → file-path based save
+
+**File:** `src/services/storage/interface.ts`, `src/services/storage/local.ts`, `src/services/storage/supabase.ts`
+
+| Before | After |
+|--------|-------|
+| `save(filename, data: Buffer, mimeType)` — caller read the whole file into RAM | `save(filename, filePath, mimeType)` — provider streams from disk |
+| Local: `fs.writeFileSync(fp, data)` | Local: `fs.copyFileSync(filePath, fp)` |
+| Supabase: `openAsBlob(filePath)` fed to SDK | Supabase: `fs.createReadStream(filePath).pipe(req)` via raw `http/https` |
+
+### 2.3 The SDK's FormData OOM (the subtle one)
+
+> **Failure:** uploading a ~300MB file spiked memory by **+302MB**, OOM-killing the 512MB instance mid-upload
+> ("Cannot reach backend" then a restart). The SDK wraps Blobs in `FormData`, and undici buffers the **entire**
+> FormData in RAM even for a file-backed Blob.
+
+**File:** `src/services/storage/supabase.ts` — removed the `@supabase/supabase-js` dependency from this provider entirely.
+
+| Before | After |
+|--------|-------|
+| SDK `upload()` → FormData → undici buffers whole body (+302MB/300MB) | Raw `http`/`https` request, `fs.createReadStream().pipe(req)` (**+68MB**/300MB) |
+| `supabase-js` imported | No SDK — direct REST with `Authorization` + `x-upsert: true` |
+
+**What it fixed:** Streaming to Supabase keeps RAM flat regardless of file size.
+
+### 2.4 `exists()` was downloading the whole file
+
+> **Failure:** clicking **Process** OOM-killed the server a few seconds in. The process route called
+> `storage.exists()`, which was implemented as `read()` — fetching and buffering the entire audio just to check it exists.
+
+**File:** `src/services/storage/supabase.ts`
+
+| Before | After |
+|--------|-------|
+| `exists()` → `read()` → full download → `Buffer` | `exists()` sends `Range: bytes=0-0` and checks the status (404 = missing, 200/206/416 = present) |
+
+---
+
+## 3. Upload & Processing Limits
+
+**Files:** `src/routes/meetings.ts`, `src/routes/legacy-meetings.ts`, `src/services/transcription.ts`
+
+| Limit | Before | After |
+|-------|--------|-------|
+| Multer upload `fileSize` | 200MB → 500MB | **2GB** |
+| Local whisper stdout `maxBuffer` | 50MB | **200MB** |
+
+---
+
+## 4. Transcription — Deepgram 5-minute timeout
+
+> **Failure:** meetings > ~60 min failed during transcription.
+
+**File:** `src/services/transcription.ts` — added `requestLongTimeout()` helper
+
+| Before | After |
+|--------|-------|
+| Global `fetch()` (undici) to Deepgram — **aborts after 5 min** with no response headers | Raw `http`/`https` request with **2-hour idle timeout** |
+| Long files queued by Deepgram exceed 5 min → request dies | Request stays open while Deepgram processes |
+
+---
+
+## 5. Streaming Audio End-to-End (2-hour meetings)
+
+> **Goal:** make 2-hour meetings consistently succeed on Render's 512MB instance.
+
+**Files:** `src/services/storage/interface.ts`, `supabase.ts`, `local.ts`, `src/services/transcription.ts`,
+`src/routes/meetings.ts`, `src/routes/legacy-meetings.ts`, `src/index.ts`
+
+### 5.1 `StorageProvider.readStream()`
+
+| Before | After |
+|--------|-------|
+| `read()` → full `Buffer` | `readStream(key, signal?)` → `{ stream, size }` — streams ONE stored object |
+| Supabase: `fetch` + `arrayBuffer` | Supabase: `fetch` + `Readable.fromWeb(res.body)` (abortable) |
+| Local: `fs.readFileSync` | Local: `fs.createReadStream` |
+
+### 5.2 Download for processing
+
+**File:** `src/routes/meetings.ts` — `processMeeting`
+
+| Before | After |
+|--------|-------|
+| `storage.read()` → full Buffer → `fs.writeFileSync` | `storage.readStream()` → `pipe` to disk via `fs.createWriteStream` |
+
+### 5.3 Deepgram body streamed
+
+**File:** `src/services/transcription.ts` — `transcribeDeepgram`
+
+| Before | After |
+|--------|-------|
+| `fs.readFileSync(audioToSend)` → whole Buffer as body | `fs.createReadStream(audioToSend)` as body |
+| `Content-Type` hardcoded `audio/wav` | `Content-Type` from actual extension via `getMimeType()` |
+
+### 5.4 Save the ORIGINAL upload (not a WAV)
+
+> **Fix:** the upload handler used to run `normalizeAudio` (ffmpeg → WAV, 10–20× larger) and rename to `.wav`.
+> On Render there's no ffmpeg, so webm/opus bytes were being stored as `*.wav` and **mislabeled** `audio/wav` — a latent
+> playback/transcription bug. Now the original compressed file is stored with its correct extension.
+
+### 5.5 Playback streams to the client
+
+| Before | After |
+|--------|-------|
+| `storage.read()` + `res.send(buffer)` | `readStream` → `pipe(res)`, `Content-Length` set, abort on client disconnect |
+
+### 5.6 Crash recovery on boot
+
+**File:** `src/index.ts` — `recoverInterruptedMeetings()`
+
+| Before | After |
+|--------|-------|
+| Crash mid-processing → meeting stuck in `transcribing` forever | On boot: stuck `transcribing`/`summarizing` → `status:"error"` ("please re-run"); stuck `uploading` → `pending` |
+
+---
+
+## 6. Server Crash on Client Disconnect (the streaming gotcha)
+
+> **Failure:** a client disconnecting mid-stream (e.g. the frontend tearing down the audio player when processing starts)
+> triggered `res.on("close") → abort()`, which surfaced an `AbortError` on the source `Readable`. With no `'error'`
+> listener, that **unhandled error crashed the entire process** — "Cannot reach backend" then restart.
+
+**Files:** `src/routes/meetings.ts`, `src/routes/legacy-meetings.ts`, `src/services/storage/supabase.ts`
+
+| Before | After |
+|--------|-------|
+| `res.on("close") → abort.abort()` unconditionally | Guard with `if (!res.writableEnded) abort.abort()` |
+| No `'error'` listener on the streamed `Readable` | No-op `'error'` listener — a disconnect is expected, swallow it |
+| 500 catch wrote to a closed response | Guarded with `if (!res.headersSent && !res.writableEnded)` |
+| Supabase `save()` file stream had no error handler | `fileStream.on("error", (e) => req.destroy(e))` |
+
+---
+
+## 7. Backend Resilience Hardening
+
+> **Goal:** survive crashes, restarts, and provider blips without the "went down during the day, came back later"
+> pattern that plagues free tier.
+
+**Files:** `src/index.ts`, `src/services/processQueue.ts` (**NEW**), `src/utils/retry.ts` (**NEW**),
+`src/routes/meetings.ts`, `src/routes/legacy-meetings.ts`, `src/services/transcription.ts`,
+`src/services/llm/deepseek.ts`, `src/services/storage/supabase.ts`
+
+### 7.1 Process-level crash protection
+
+**File:** `src/index.ts`
+
+| Before | After |
+|--------|-------|
+| No handler — one unhandled rejection/exception killed the whole process (30–60s cold start) | `process.on("uncaughtException" / "unhandledRejection")` — log loudly, keep serving |
+
+### 7.2 Graceful shutdown
+
+| Before | After |
+|--------|-------|
+| SIGTERM (deploy/restart) cut in-flight jobs mid-transcription | SIGTERM/SIGINT handler: stop accepting → drain in-flight → close DB pool → exit (15s force-exit fallback) |
+
+### 7.3 Startup DB retry + real health check
+
+| Before | After |
+|--------|-------|
+| Single `prisma.$connect()`, `exit(1)` on a transient Supabase blip → server stays down | `connectWithRetry()` — exponential backoff (5 attempts) |
+| `/api/health` returned `ok` always | `/api/health` pings the DB (`SELECT 1`); returns `503 db_unreachable` on failure |
+
+### 7.4 Concurrency + no double-processing
+
+**File:** `src/services/processQueue.ts` (**NEW**)
+
+| Before | After |
+|--------|-------|
+| `processMeeting` unbounded — N concurrent jobs stacked ffmpeg + Deepgram + LLM → OOM on 512MB | `runWithConcurrencyLimit()` — `MAX_CONCURRENT = 1`, jobs serialize, rest queue |
+| Status check was read-then-act (two requests could both pass and double-process → double Deepgram/LLM spend) | **Atomic claim** via `prisma.meeting.updateMany({ where: { id, status: { notIn: [transcribing, summarizing] } }, data: { status: "transcribing" } })` — the DB decides who wins |
+
+### 7.5 Temp file cleanup on upload error
+
+| Before | After |
+|--------|-------|
+| If `storage.save` threw, `.upload-tmp` leaked on Render's ephemeral disk | `catch` block unlinks `req.file.path` |
+
+### 7.6 Retry on transient provider errors
+
+**File:** `src/utils/retry.ts` (**NEW**) — `withRetry()` with exponential backoff on 5xx/429/network errors.
+
+| Provider | Before | After |
+|----------|--------|-------|
+| Deepgram | No retry — one 5xx marked the meeting `error` | Retries 3× (`maxRetries: 3`, `baseDelayMs: 1500`); WAV temp cleanup in `finally` survives attempts |
+| DeepSeek/LLM | SDK default `maxRetries=2`, 10-min default | `maxRetries: 3`, explicit `timeout: 10 * 60 * 1000` |
+| Supabase storage | No retry on `save`/`read`/`delete`/`exists` | `withRetry` wrapped on all four (3×, backoff) |
+
+### 7.7 Async ffmpeg (no event-loop freeze)
+
+> **Why:** `execSync` ffmpeg passes (up to 600s) blocked the **entire event loop** — every request including
+> `/api/health` hung while normalizing audio, so the backend "looked down" during every long meeting.
+
+**File:** `src/services/transcription.ts`
+
+| Before | After |
+|--------|-------|
+| `execSync(\`${FFMPEG_PATH} -i … -af …\`)` in `analyzeVolume`, `normalizeAudio` passes, and Deepgram WAV conversion | `runFfmpeg(args, timeoutMs)` — async `execFile`, non-blocking |
+| Event loop frozen for the duration of each ffmpeg pass | Server stays responsive during processing |
+
+---
+
+## Summary: All Files Changed (recent work)
+
+| File | Type of Change |
+|------|---------------|
+| `src/services/storage/supabase.ts` | Streaming save (no SDK/FormData), `readStream`, `exists()` via Range, retries, stream error guards |
+| `src/services/storage/interface.ts` | Added `StoredStream` + `readStream(key, signal?)` |
+| `src/services/storage/local.ts` | `readStream` via `fs.createReadStream`, `copyFileSync` save |
+| `src/services/transcription.ts` | `requestLongTimeout` (2h), streamed Deepgram body, async `runFfmpeg`, Deepgram retry, `normalizeAudio` async |
+| `src/routes/meetings.ts` | Streaming playback/process, save original upload, atomic process claim, concurrency cap, temp cleanup, crash-safe streams |
+| `src/routes/legacy-meetings.ts` | Mirrors all meeting.ts changes |
+| `src/index.ts` | Crash handlers, graceful shutdown, DB retry, real health check, crash recovery |
+| `src/services/processQueue.ts` | **NEW** — `runWithConcurrencyLimit` (MAX_CONCURRENT=1) |
+| `src/utils/retry.ts` | **NEW** — `withRetry` exponential backoff |
+| `src/services/llm/deepseek.ts` | `maxRetries: 3`, 10-min timeout |
+| `src/services/email/` | **NEW** — SendGrid REST delivery (replaces SMTP) |
+
