@@ -5,6 +5,7 @@ import fs from "fs";
 import { config } from "../config";
 import { prisma } from "../db";
 import { getStorageProvider } from "../services/storage";
+import { runWithConcurrencyLimit } from "../services/processQueue";
 import { LlmOverride } from "../services/summarizer";
 import { requireWorkspaceAdmin } from "../middleware/workspace";
 import { AppError, Errors } from "../utils/errors";
@@ -382,6 +383,11 @@ meetingRoutes.post("/:mid/audio", upload.single("audio"), async (req: Request, r
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
     console.error(` Audio upload failed: ${message}`);
+    // Clean up the temp upload file if storage.save threw — otherwise it leaks
+    // on Render's ephemeral disk until the next redeploy.
+    if (req.file?.path) {
+      try { fs.unlinkSync(req.file.path); } catch { /* ignore */ }
+    }
     res.status(500).json({ error: "server_error", message: `Failed to upload audio: ${message}` });
   }
 });
@@ -470,11 +476,19 @@ meetingRoutes.post("/:mid/process", async (req: Request, res: Response) => {
       return;
     }
 
-    if (meeting.status === "error") {
-      await prisma.meeting.update({
-        where: { id: meeting.id },
-        data: { error: null },
+    // Atomic claim — atomically transition the meeting to "transcribing" so two
+    // simultaneous requests can't both pass the status check and double-process
+    // (double Deepgram/LLM spend, raced DB writes).
+    const claimed = await prisma.meeting.updateMany({
+      where: { id: meeting.id, status: { notIn: ["transcribing", "summarizing"] } },
+      data: { status: "transcribing", error: null },
+    });
+    if (claimed.count === 0) {
+      res.status(202).json({
+        success: true,
+        data: { message: "Already processing", meetingId: meeting.id },
       });
+      return;
     }
 
     const llmOverride: Partial<LlmOverride> = {};
@@ -734,14 +748,18 @@ async function processMeeting(
   meetingId: string,
   llmOverride?: { provider?: string; apiKey?: string; model?: string; baseURL?: string }
 ) {
+  // Serialize processing to avoid stacking ffmpeg + Deepgram + LLM jobs on the
+  // 512MB Render instance (queued jobs wait for a slot, then run sequentially).
+  await runWithConcurrencyLimit(() => processMeetingInner(meetingId, llmOverride));
+}
+
+async function processMeetingInner(
+  meetingId: string,
+  llmOverride?: { provider?: string; apiKey?: string; model?: string; baseURL?: string }
+) {
   let audioTmpPath: string | null = null;
 
   try {
-    await prisma.meeting.update({
-      where: { id: meetingId },
-      data: { status: "transcribing" },
-    });
-
     const meeting = await prisma.meeting.findUniqueOrThrow({
       where: { id: meetingId },
     });

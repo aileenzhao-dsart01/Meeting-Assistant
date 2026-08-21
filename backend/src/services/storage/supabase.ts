@@ -3,6 +3,7 @@ import http from "http";
 import https from "https";
 import { Readable } from "stream";
 import { config } from "../../config";
+import { withRetry } from "../../utils/retry";
 import { StorageProvider, StoredStream } from "./interface";
 
 const DEFAULT_BUCKET = "meeting-audio";
@@ -43,29 +44,38 @@ export class SupabaseStorageProvider implements StorageProvider {
 
     // Stream the file from disk to Supabase — no in-memory copy.
     // http.ClientRequest is a Writable; pipe() handles backpressure.
-    const resp = await new Promise<http.IncomingMessage>((resolve, reject) => {
-      const parsed = new URL(url);
-      const mod = parsed.protocol === "https:" ? https : http;
-      const req = mod.request(
-        parsed,
-        {
-          method: "POST",
-          headers: {
-            ...this.headers,
-            "Content-Type": mimeType,
-            "Content-Length": String(size),
-            "Cache-Control": "max-age=3600",
-            "x-upsert": "true",
-          },
-        },
-        (res) => resolve(res)
-      );
-      req.on("error", reject);
-      const fileStream = fs.createReadStream(filePath);
-      // Unhandled 'error' on a stream kills the process — forward it to the request
-      fileStream.on("error", (err) => req.destroy(err));
-      fileStream.pipe(req);
-    });
+    // Retry transient 5xx/network errors; the stream is recreated per attempt.
+    const resp = await withRetry(
+      () =>
+        new Promise<http.IncomingMessage>((resolve, reject) => {
+          const parsed = new URL(url);
+          const mod = parsed.protocol === "https:" ? https : http;
+          const req = mod.request(
+            parsed,
+            {
+              method: "POST",
+              headers: {
+                ...this.headers,
+                "Content-Type": mimeType,
+                "Content-Length": String(size),
+                "Cache-Control": "max-age=3600",
+                "x-upsert": "true",
+              },
+            },
+            (res) => resolve(res)
+          );
+          req.on("error", reject);
+          const fileStream = fs.createReadStream(filePath);
+          // Unhandled 'error' on a stream kills the process — forward it to the request
+          fileStream.on("error", (err) => req.destroy(err));
+          fileStream.pipe(req);
+        }),
+      (err) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        return !/^(4\d\d|401|403)/.test(msg);
+      },
+      { maxRetries: 3, baseDelayMs: 1500 }
+    );
 
     if (resp.statusCode !== 200 && resp.statusCode !== 201) {
       const chunks: Buffer[] = [];
@@ -79,9 +89,11 @@ export class SupabaseStorageProvider implements StorageProvider {
   }
 
   async read(filename: string): Promise<Buffer | null> {
-    const resp = await fetch(`${this.baseUrl}/${filename}`, {
-      headers: this.headers,
-    });
+    const resp = await withRetry(
+      () => fetch(`${this.baseUrl}/${filename}`, { headers: this.headers }),
+      undefined,
+      { maxRetries: 3, baseDelayMs: 1000 }
+    );
 
     if (resp.status === 404) return null;
     if (!resp.ok) {
@@ -115,10 +127,14 @@ export class SupabaseStorageProvider implements StorageProvider {
   }
 
   async delete(filename: string): Promise<boolean> {
-    const resp = await fetch(`${this.baseUrl}/${filename}`, {
-      method: "DELETE",
-      headers: this.headers,
-    });
+    const resp = await withRetry(
+      () => fetch(`${this.baseUrl}/${filename}`, {
+        method: "DELETE",
+        headers: this.headers,
+      }),
+      undefined,
+      { maxRetries: 3, baseDelayMs: 1000 }
+    );
 
     if (resp.status === 404) return false;
     if (!resp.ok) {
@@ -133,9 +149,13 @@ export class SupabaseStorageProvider implements StorageProvider {
     // Request only the first byte instead of downloading the whole file.
     // (read() — which buffers the entire audio into RAM — used to OOM a 512MB
     // Render instance when the process route checked existence of a large file.)
-    const resp = await fetch(`${this.baseUrl}/${filename}`, {
-      headers: { ...this.headers, Range: "bytes=0-0" },
-    });
+    const resp = await withRetry(
+      () => fetch(`${this.baseUrl}/${filename}`, {
+        headers: { ...this.headers, Range: "bytes=0-0" },
+      }),
+      undefined,
+      { maxRetries: 2, baseDelayMs: 800 }
+    );
 
     if (resp.status === 404) return false;
     if (resp.status === 200 || resp.status === 206 || resp.status === 416) return true;

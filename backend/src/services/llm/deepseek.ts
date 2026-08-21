@@ -170,6 +170,10 @@ export class DeepSeekProvider implements LLMProvider {
     this.client = new OpenAI({
       baseURL,
       apiKey,
+      // Retry transient 5xx/429/network errors (default is 2; bump to 3).
+      // 10-min timeout so a long summary of a 2h meeting has room to finish.
+      maxRetries: 3,
+      timeout: 10 * 60 * 1000,
     });
   }
 

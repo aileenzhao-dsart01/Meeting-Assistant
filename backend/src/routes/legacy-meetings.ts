@@ -15,6 +15,7 @@ import { prisma } from "../db";
 import { requireAuth } from "../middleware/auth";
 import { AppError, Errors } from "../utils/errors";
 import { getStorageProvider } from "../services/storage";
+import { runWithConcurrencyLimit } from "../services/processQueue";
 import { LlmOverride } from "../services/summarizer";
 import path from "path";
 import fs from "fs";
@@ -326,6 +327,10 @@ legacyMeetingRoutes.post("/:id/audio", upload.single("audio"), async (req: Reque
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
     console.error(`✗ Audio upload failed for meeting ${String(req.params.id)}:`, message);
+    // Clean up the temp upload file if storage.save threw — otherwise it leaks
+    if (req.file?.path) {
+      try { fs.unlinkSync(req.file.path); } catch { /* ignore */ }
+    }
     res.status(500).json({ error: "server_error", message: `Failed to upload audio: ${message}` });
   }
 });
@@ -401,8 +406,16 @@ legacyMeetingRoutes.post("/:id/process", async (req: Request, res: Response) => 
       res.status(202).json({ success: true, data: { message: "Already processing", meetingId: meeting.id, status: meeting.status } });
       return;
     }
-    if (meeting.status === "error") {
-      await prisma.meeting.update({ where: { id: meeting.id }, data: { error: null } });
+
+    // Atomic claim — atomically transition to "transcribing" so simultaneous
+    // requests can't double-process the same meeting.
+    const claimed = await prisma.meeting.updateMany({
+      where: { id: meeting.id, status: { notIn: ["transcribing", "summarizing"] } },
+      data: { status: "transcribing", error: null },
+    });
+    if (claimed.count === 0) {
+      res.status(202).json({ success: true, data: { message: "Already processing", meetingId: meeting.id } });
+      return;
     }
 
     const llmOverride: Partial<LlmOverride> = {};
@@ -411,10 +424,9 @@ legacyMeetingRoutes.post("/:id/process", async (req: Request, res: Response) => 
     if (req.headers["x-llm-model"]) llmOverride.model = String(req.headers["x-llm-model"]);
     if (req.headers["x-llm-base-url"]) llmOverride.baseURL = String(req.headers["x-llm-base-url"]);
 
-    (async () => {
+    runWithConcurrencyLimit(async () => {
       let audioTmpPath: string | null = null;
       try {
-        await prisma.meeting.update({ where: { id: meeting.id }, data: { status: "transcribing" } });
         const m = await prisma.meeting.findUniqueOrThrow({ where: { id: meeting.id } });
         audioTmpPath = path.resolve(config.audio.storagePath, `.process-${m.recordingUrl}`);
         // Stream from storage to disk — avoids loading the whole file into RAM
@@ -463,7 +475,7 @@ legacyMeetingRoutes.post("/:id/process", async (req: Request, res: Response) => 
           try { fs.unlinkSync(audioTmpPath); } catch { /* ignore */ }
         }
       }
-    })().catch((err) => console.error(`Processing failed for meeting ${meeting.id}:`, err));
+    }).catch((err: unknown) => console.error(`Processing failed for meeting ${meeting.id}:`, err));
 
     res.status(202).json({ success: true, data: { message: "Processing started", meetingId: meeting.id } });
   } catch (err) {

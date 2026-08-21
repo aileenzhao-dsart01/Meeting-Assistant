@@ -1,9 +1,10 @@
-import { execSync, exec } from "child_process";
+import { execSync, exec, execFile } from "child_process";
 import fs from "fs";
 import http from "http";
 import https from "https";
 import path from "path";
 import { config } from "../config";
+import { withRetry } from "../utils/retry";
 
 // ---------- MIME types for audio upload ----------
 const MIME_TYPES: Record<string, string> = {
@@ -63,13 +64,33 @@ interface VolumeInfo {
 }
 
 /**
+ * Run an async ffmpeg command without blocking the event loop.
+ * Returns stdout (with stderr merged, since ffmpeg logs to stderr).
+ */
+async function runFfmpeg(args: string[], timeoutMs: number): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    const child = execFile(FFMPEG_PATH, args, { timeout: timeoutMs }, (error, stdout, stderr) => {
+      const merged = (stdout || "") + (stderr || "");
+      if (error) {
+        const err = new Error(merged.trim() || error.message);
+        (err as Error & { code?: unknown }).code = (error as any).code;
+        reject(err);
+      } else {
+        resolve(merged);
+      }
+    });
+    child.stderr?.on("data", () => { /* collected via callback */ });
+  });
+}
+
+/**
  * Analyze audio file volume using ffmpeg volumedetect filter.
  * Returns mean and max volume in dB.
  */
-function analyzeVolume(audioPath: string): VolumeInfo {
-  const result = execSync(
-    `${FFMPEG_PATH} -i "${audioPath}" -af volumedetect -vn -sn -f null - 2>&1`,
-    { timeout: 30000, encoding: "utf-8" }
+async function analyzeVolume(audioPath: string): Promise<VolumeInfo> {
+  const result = await runFfmpeg(
+    ["-i", audioPath, "-af", "volumedetect", "-vn", "-sn", "-f", "null", "-"],
+    30000
   );
 
   const meanMatch = result.match(/mean_volume:\s+(-?[\d.]+)\s*dB/);
@@ -108,7 +129,7 @@ function isFFmpegAvailable(): boolean {
  * @param audioPath - Original audio file path
  * @returns Path to the normalized audio file (caller must clean up)
  */
-export function normalizeAudio(audioPath: string): string {
+export async function normalizeAudio(audioPath: string): Promise<string> {
   if (!config.audioNormalization.enabled) {
     return audioPath;
   }
@@ -118,7 +139,7 @@ export function normalizeAudio(audioPath: string): string {
     return audioPath;
   }
 
-  const volume = analyzeVolume(audioPath);
+  const volume = await analyzeVolume(audioPath);
   const target = config.audioNormalization.targetLoudness;
   const gainNeeded = Math.round(target - volume.meanVolume);
 
@@ -198,9 +219,9 @@ export function normalizeAudio(audioPath: string): string {
         break;
     }
 
-    execSync(
-      `${FFMPEG_PATH} -i "${audioPath}" -af "${filterChain}" -c:a pcm_s16le -y "${normalizedPath}" 2>&1`,
-      { timeout: 600000, encoding: "utf-8" }
+    await runFfmpeg(
+      ["-i", audioPath, "-af", filterChain, "-c:a", "pcm_s16le", "-y", normalizedPath],
+      600000
     );
 
     const normSize = fs.statSync(normalizedPath).size;
@@ -221,9 +242,9 @@ export function normalizeAudio(audioPath: string): string {
       try {
         const fbChain = "highpass=f=100,lowpass=f=8000" +
           (effectiveGain > 1 ? `,volume=${effectiveGain}dB` : "");
-        execSync(
-          `${FFMPEG_PATH} -i "${audioPath}" -af "${fbChain}" -c:a pcm_s16le -y "${normalizedPath}" 2>&1`,
-          { timeout: 300000, encoding: "utf-8" }
+        await runFfmpeg(
+          ["-i", audioPath, "-af", fbChain, "-c:a", "pcm_s16le", "-y", normalizedPath],
+          300000
         );
         if (fs.statSync(normalizedPath).size > 0) {
           console.log(`  → Fallback to basic mode OK`);
@@ -236,9 +257,9 @@ export function normalizeAudio(audioPath: string): string {
     if (!fallbackOk && effectiveGain > 1) {
       console.log(`  → Fallback: volume gain (${effectiveGain} dB)...`);
       try {
-        execSync(
-          `${FFMPEG_PATH} -i "${audioPath}" -af "volume=${effectiveGain}dB" -c:a pcm_s16le -y "${normalizedPath}" 2>&1`,
-          { timeout: 300000, encoding: "utf-8" }
+        await runFfmpeg(
+          ["-i", audioPath, "-af", `volume=${effectiveGain}dB`, "-c:a", "pcm_s16le", "-y", normalizedPath],
+          300000
         );
         if (fs.statSync(normalizedPath).size > 0) fallbackOk = true;
       } catch { /* skip */ }
@@ -481,9 +502,9 @@ async function transcribeDeepgram(audioPath: string, language?: string): Promise
         counter++;
       }
 
-      execSync(
-        `${FFMPEG_PATH} -i "${audioPath}" -vn -ar 16000 -ac 1 -sample_fmt s16 -y "${wavPath}" 2>&1`,
-        { timeout: 120000, encoding: "utf-8" }
+      await runFfmpeg(
+        ["-i", audioPath, "-vn", "-ar", "16000", "-ac", "1", "-sample_fmt", "s16", "-y", wavPath],
+        120000
       );
 
       audioToSend = wavPath;
@@ -534,22 +555,35 @@ async function transcribeDeepgram(audioPath: string, language?: string): Promise
   // Stream the file body — avoids loading a multi-hundred-MB buffer into RAM
   // (a 2h meeting would OOM on Render's 512MB instance).
   // Content-Type must match the actual container (webm/opus, mp3), not "audio/wav".
-  const response = await requestLongTimeout(
-    `https://api.deepgram.com/v1/listen?${searchParams.toString()}`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Token ${apiKey}`,
-        "Content-Type": getMimeType(audioToSend),
-        "Content-Length": String(fileSize),
+  // Retry transient 5xx/429 responses (the WAV file must survive between
+  // attempts, so cleanup happens in the finally below, not between attempts).
+  let response: Response;
+  try {
+    response = await withRetry(
+      () => requestLongTimeout(
+        `https://api.deepgram.com/v1/listen?${searchParams.toString()}`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Token ${apiKey}`,
+            "Content-Type": getMimeType(audioToSend),
+            "Content-Length": String(fileSize),
+          },
+          body: fs.createReadStream(audioToSend),
+        }
+      ),
+      (err) => {
+        // Retry on network-level errors (ECONNRESET, socket hang up, etc.)
+        const msg = err instanceof Error ? err.message : String(err);
+        return !/^(4\d\d|401|403)/.test(msg);
       },
-      body: fs.createReadStream(audioToSend),
+      { maxRetries: 3, baseDelayMs: 1500 }
+    );
+  } finally {
+    // Clean up temp WAV file (after retries complete, success or failure)
+    if (wavPath && fs.existsSync(wavPath)) {
+      try { fs.unlinkSync(wavPath); } catch { /* ignore */ }
     }
-  );
-
-  // Clean up temp WAV file
-  if (wavPath && fs.existsSync(wavPath)) {
-    try { fs.unlinkSync(wavPath); } catch { /* ignore */ }
   }
 
   if (!response.ok) {
@@ -664,7 +698,7 @@ export async function transcribeAudio(
   const originalPath = audioPath;
   let normalizedPath: string | null = null;
   try {
-    normalizedPath = normalizeAudio(audioPath);
+    normalizedPath = await normalizeAudio(audioPath);
     if (normalizedPath !== audioPath) {
       console.log(`  → Using normalized audio for transcription`);
     }
