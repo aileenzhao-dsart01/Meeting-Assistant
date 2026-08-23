@@ -3,7 +3,7 @@ services:
     name: meeting-assistant-api
     runtime: node
     repo: https://github.com/aileenzhao-dsart01/Meeting-Assistant
-    plan: free
+    plan: starter
     region: oregon
     buildCommand: cd backend && npm install && npx prisma generate && npm run build
     startCommand: cd backend && npm start

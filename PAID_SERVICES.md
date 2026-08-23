@@ -15,7 +15,7 @@ All third-party services used by this project, their pricing, and what you need 
 
 **What we use:** PostgreSQL database + connection pooler.
 
-**Status:** ✅ Currently on **Free tier**.
+**Status:** ✅ Currently on **Pro tier** ($25/mo, no auto-pause).
 
 ---
 
@@ -36,7 +36,7 @@ All third-party services used by this project, their pricing, and what you need 
 
 ---
 
-## 3. Speech-to-Text (Cloud) — Deepgram Nova-2
+## 3. Speech-to-Text (Cloud) — Deepgram Nova-3
 
 **Account:** https://console.deepgram.com/signup
 
@@ -47,28 +47,30 @@ All third-party services used by this project, their pricing, and what you need 
 | Free credit | **$200 pre-loaded** | ❌ **No** |
 | After credit | $0.0043/min | ✅ |
 
-**What we use:** Transcribes meeting audio when deployed to Render (no Python/Whisper available).
+**What we use:** Transcribes meeting audio on Render (no Python/Whisper available there).
 
 **Skip this if:** Running locally with faster-whisper (Python) is **free**.
 
-**Status:** ❌ **Not yet set up** — need to create a Deepgram account and add `DEEPGRAM_API_KEY` to Render env vars.
+**Status:** ✅ **Active** — `DEEPGRAM_API_KEY` set; `STT_PROVIDER=deepgram`, model `nova-3`.
 
 ---
 
-## 4. Hosting (Optional) — Render
+## 4. Hosting — Render
 
 **Account:** https://dashboard.render.com
 
-| Plan | Price | Limits |
-|------|-------|--------|
-| Free | $0 | 750 hrs/mo, spins down after 15 min idle, 100 GB bandwidth |
-| Starter | $7/mo | No spin-down |
+Two separate billing dimensions:
 
-**What we use:** Hosts the backend API with a **permanent HTTPS URL**.
+| Dimension | Plan | Price | Notes |
+|-----------|------|-------|-------|
+| Workspace | Hobby | **$0** | Free workspace plan (seats, bandwidth, compliance reports) |
+| Instance type | Starter | **~$7/mo** | Always-on, 0.5 CPU / 512 MB, no spin-down |
 
-**Estimated cost:** $0 (free tier is sufficient for development).
+**What we use:** Hosts the backend API with a **permanent HTTPS URL** (`meeting-assistant-api-rqf7.onrender.com`).
 
-**Status:** ✅ Code ready. Not deployed yet.
+> **Don't confuse the two.** Workspace plan (Hobby/Pro/Scale/Enterprise) is a flat workspace fee; instance type (free/starter/standard/pro/...) is per-service compute. Paid instances (Starter+) are always-on; free instances spin down after ~15 min idle. A "Suspended by owner" response (`x-render-routing: suspend-by-user`) means the service was manually paused or billing lapsed.
+
+**Status:** ✅ **Deployed & live** on Starter instance + Hobby workspace.
 
 ---
 
@@ -95,7 +97,7 @@ All third-party services used by this project, their pricing, and what you need 
 |------|-------|-------------|
 | `cloudflared tunnel` | **Free** | ❌ URL changes every restart |
 | ngrok | Free tier (needs account) | ❌ URL changes every restart |
-| Render (proper deploy) | Free tier | ✅ Permanent URL |
+| Render (proper deploy) | Starter (~$7/mo) | ✅ Permanent URL |
 
 **What we use:** Temporary HTTPS tunnel for dev/testing when the backend runs locally.
 
@@ -107,19 +109,18 @@ All third-party services used by this project, their pricing, and what you need 
 
 | Service | Purpose | Cost | Account Needed | Setup Status |
 |---------|---------|------|---------------|--------------|
-| Supabase | Database | Free tier | ✅ Done | ✅ Connected |
+| Supabase | Database | **Pro tier ($25/mo)** — no auto-pause | ✅ Done | ✅ Connected |
 | DeepSeek | Summarization | ~$0.002/meeting | ✅ Done | ✅ Key set |
-| Deepgram | Transcription (cloud) | $200 free credit | ❌ **Needs signup** | ❌ Not yet |
-| Render | Backend hosting | Free tier | ❌ **Needs signup** | ❌ Not deployed |
-| Lovable | Frontend hosting | Free tier | ❌ **Needs signup** | ❌ Not built |
-| Cloudflare | Dev tunnel | Free | ❌ None needed | ✅ Active |
+| Deepgram | Transcription (cloud) | $200 free credit | ✅ Done | ✅ Active (nova-3) |
+| Render | Backend hosting | Hobby ws + Starter instance (~$7/mo) | ✅ Done | ✅ **Live** |
+| Lovable | Frontend hosting | Free tier | ✅ Done | ✅ Active (dashboard) |
+| Cloudflare | Dev tunnel | Free | ❌ None needed | ⚠️ Dev-only, ephemeral |
 
-## Setup priority
+## Notes
 
-1. **Deepgram** (🔴 needed for Render deployment — transcription won't work otherwise)
-2. **Render** (🟡 nice to have — permanent URL instead of ephemeral tunnels)
-3. **Lovable** (🟢 build the frontend)
+- **Render** is now paid (~$7/mo, Starter instance). Keep a valid card on file — an unpaid balance is the main cause of services being suspended.
+- **Supabase is on Pro** ($25/mo) — no auto-pause, so no more `503 db_unreachable` from an idle database.
 
 ---
 
-*Last updated: 2026-06-06*
+*Last updated: 2026-08-23*

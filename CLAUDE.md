@@ -197,15 +197,22 @@ Require auth, resolve to user's default workspace. **Deprecated.**
 
 ## Deployment (Render)
 
-The project includes `render.yaml` for one-click deploy on [Render](https://render.com) free tier.
+The project includes `render.yaml` for one-click deploy on [Render](https://render.com). The service runs on a **Starter instance type** (always-on, ~$7/mo) on a **Hobby (free) workspace plan**.
 
-**Limitations on Render free tier:**
-- ❌ No Python runtime — local Whisper won't work
-- ❌ No ffmpeg — audio normalization disabled
+**Two separate billing dimensions (common source of confusion):**
+- **Workspace plan** (Hobby free / Pro $25 / Scale $499 / Enterprise custom) — flat workspace fee for seats, bandwidth, compliance reports. On **Hobby**.
+- **Service instance type** (free / starter / standard / pro / pro plus / pro max / pro ultra) — per-service compute, billed separately, selected on the *service* itself. Free instances spin down after ~15 min inactivity; paid instances (starter ≈ $7, standard ≈ $25) are always-on.
+
+**On a paid instance type (Starter/Standard+):**
+- ✅ Always on — no 15-min inactivity spin-down, no "suspended by owner" surprise (suspension happens when a free service is manually paused or the account hits a billing state)
+- ❌ Still no Python runtime — local Whisper won't work; use **Deepgram Nova-3** cloud STT
+- ❌ Still no ffmpeg — audio normalization disabled (Deepgram accepts raw uploads)
 - ✅ **Deepgram Nova-3** cloud STT works (set `DEEPGRAM_API_KEY`)
 - ✅ DeepSeek summarization works
 - ✅ All API endpoints work
 - ✅ Audio file storage works (ephemeral disk)
+
+> **If the service shows "Suspended by owner" or spins down on the free tier:** resume it from the Render dashboard → service → **Resume**. Verify with `curl -i https://<service>.onrender.com/api/health` (expect `HTTP 200` + `{"status":"ok"}`). A `503` with `x-render-routing: suspend-by-user` means a manual pause; `suspend-by-inactivity` means free-tier idle sleep.
 
 **Required env vars for Render:**
 | Key | Value |
