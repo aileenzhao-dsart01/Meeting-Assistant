@@ -1,4 +1,4 @@
-import { execSync, exec, execFile } from "child_process";
+import { execSync, exec, execFile, execFileSync } from "child_process";
 import fs from "fs";
 import http from "http";
 import https from "https";
@@ -21,6 +21,70 @@ const MIME_TYPES: Record<string, string> = {
 function getMimeType(filePath: string): string {
   const ext = path.extname(filePath).toLowerCase();
   return MIME_TYPES[ext] || "application/octet-stream";
+}
+
+/** EBML magic — starts every Matroska/WebM document. */
+const EBML_MAGIC = Buffer.from([0x1a, 0x45, 0xdf, 0xa3]);
+
+/**
+ * Detect a WebM/Matroska file that is actually two recordings spliced together.
+ *
+ * When the browser's MediaRecorder is stopped and restarted mid-meeting (pause,
+ * tab sleep, reconnect) the frontend can concatenate the resulting blobs into a
+ * single file. Each recording carries its own EBML header + Segment, so the
+ * second header resets the cluster timeline to zero partway through.
+ *
+ * Deepgram's demuxer rejects that outright:
+ *   "failed to process audio: corrupt or unsupported data"
+ * while ffmpeg tolerates it and re-times the stream — hence the transcode
+ * fallback in transcribeDeepgram().
+ *
+ * A well-formed file has exactly one EBML header at offset 0.
+ */
+function isConcatenatedWebm(filePath: string): { concatenated: boolean; at: number } {
+  // Sniff the magic bytes rather than trusting the extension: uploads are named
+  // from the client-supplied originalname, and we already have a file in storage
+  // named ".wav" whose contents are actually WebM.
+  if (!startsWithEbmlMagic(filePath)) {
+    return { concatenated: false, at: -1 };
+  }
+
+  let fd: number | null = null;
+  try {
+    fd = fs.openSync(filePath, "r");
+    const CHUNK = 1024 * 1024;
+    const buf = Buffer.allocUnsafe(CHUNK);
+    // Carry the last 3 bytes across chunk boundaries so a header straddling a
+    // boundary is still found.
+    let carry = Buffer.alloc(0);
+    let base = 0; // absolute file offset of window[0]
+
+    for (;;) {
+      const read = fs.readSync(fd, buf, 0, CHUNK, null);
+      if (read <= 0) break;
+
+      const window = Buffer.concat([carry, buf.subarray(0, read)]);
+      // Skip index 0: a single well-formed file's only header lives there.
+      const at = window.indexOf(EBML_MAGIC, 1);
+      if (at !== -1) {
+        return { concatenated: true, at: base + at };
+      }
+
+      const carryLen = EBML_MAGIC.length - 1;
+      carry = window.subarray(window.length - carryLen);
+      base += window.length - carryLen;
+    }
+  } catch (err) {
+    // Unreadable file — let the normal upload path surface the real error.
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`  ⚠ Could not scan ${path.basename(filePath)} for concatenation: ${msg}`);
+  } finally {
+    if (fd !== null) {
+      try { fs.closeSync(fd); } catch { /* ignore */ }
+    }
+  }
+
+  return { concatenated: false, at: -1 };
 }
 
 // ---------- Semaphore: only one local transcription at a time ----------
@@ -56,7 +120,34 @@ function enqueueTranscription(run: () => Promise<string>): Promise<string> {
 
 // ---------- Audio normalization ----------
 
-const FFMPEG_PATH = "/opt/homebrew/bin/ffmpeg";
+/**
+ * Resolve the ffmpeg binary.
+ *
+ * Order:
+ *   1. FFMPEG_PATH env var — explicit override
+ *   2. @ffmpeg-installer/ffmpeg — ships a platform-specific static binary
+ *      (bundled with the npm install, so it exists on Render without apt-get)
+ *   3. "ffmpeg" on PATH — whatever the host provides
+ *
+ * This deliberately has no hardcoded macOS path: the previous
+ * "/opt/homebrew/bin/ffmpeg" never existed on Render, so every ffmpeg call
+ * silently fell back to the original audio and the cloud pipeline ran with
+ * no transcoding at all.
+ */
+function resolveFfmpegPath(): string {
+  if (process.env.FFMPEG_PATH) return process.env.FFMPEG_PATH;
+
+  try {
+    const installer = require("@ffmpeg-installer/ffmpeg") as { path?: string };
+    if (installer?.path) return installer.path;
+  } catch {
+    // Package not installed (e.g. local dev with ffmpeg on PATH) — fall through
+  }
+
+  return "ffmpeg";
+}
+
+const FFMPEG_PATH = resolveFfmpegPath();
 
 interface VolumeInfo {
   meanVolume: number;  // dB
@@ -107,12 +198,45 @@ async function analyzeVolume(audioPath: string): Promise<VolumeInfo> {
  */
 function isFFmpegAvailable(): boolean {
   try {
-    execSync(`${FFMPEG_PATH} -version`, { stdio: "pipe", timeout: 5000 });
+    // execFile (not exec): FFMPEG_PATH is now an absolute path from the
+    // @ffmpeg-installer package and can contain spaces, which an interpolated
+    // shell string would split into separate arguments.
+    execFileSync(FFMPEG_PATH, ["-version"], { stdio: "pipe", timeout: 5000 });
     return true;
   } catch {
     return false;
   }
 }
+
+/**
+ * Final stage of every enhancement chain.
+ *
+ * The chain stacks up to +16 dB of EQ boost on top of up to +30 dB of gain with
+ * nothing to catch it, and meeting-room recordings routinely arrive already
+ * peaking at 0 dBFS. Measured on a real 48-min upload, that clipped hard
+ * (astats flat factor 9.3 — i.e. thousands of flat-topped samples).
+ *
+ * limit=0.95 (-0.45 dBFS) leaves headroom for the 16 kHz resample that follows,
+ * which can overshoot slightly on its own.
+ *
+ * MUST stay last in the chain. Resampling before the limiter re-introduces
+ * overshoot — measured flat factor 0.17 with the resample first, vs 0.00 here.
+ */
+const LIMITER = "alimiter=limit=0.95";
+
+/**
+ * Output options for every normalized WAV.
+ *
+ * 16 kHz mono is what both Deepgram and Whisper resample to internally anyway
+ * (Whisper's feature extractor is 16 kHz log-mel), and every chain branch has
+ * `lowpass=f=8000` — i.e. at 16 kHz sampling nothing the chain lets through
+ * falls above Nyquist. So this is lossless here, but ~6x smaller to upload
+ * (a 48-min meeting went from 527 MB to ~88 MB).
+ *
+ * These are output options, not chain entries: putting the resample inside
+ * `-af` changes what the EQ and limiter operate on and shifts the result.
+ */
+const STT_OUTPUT_ARGS = ["-ar", "16000", "-ac", "1"];
 
 /**
  * Meeting room audio enhancement pipeline.
@@ -124,7 +248,7 @@ function isFFmpegAvailable(): boolean {
  * - Low-frequency HVAC/ambient rumble
  * - Quiet speakers mixed with loud speakers
  *
- * Pipeline: High-pass filter → Noise reduction → Speech EQ → Compression → Loudness norm
+ * Pipeline: High-pass → Speech EQ → Compression → Limiter → 16kHz mono downmix
  *
  * @param audioPath - Original audio file path
  * @returns Path to the normalized audio file (caller must clean up)
@@ -219,8 +343,11 @@ export async function normalizeAudio(audioPath: string): Promise<string> {
         break;
     }
 
+    // Cap the peak, always last — the EQ boosts and gain above can overshoot 0 dBFS.
+    filterChain += `,${LIMITER}`;
+
     await runFfmpeg(
-      ["-i", audioPath, "-af", filterChain, "-c:a", "pcm_s16le", "-y", normalizedPath],
+      ["-i", audioPath, "-af", filterChain, ...STT_OUTPUT_ARGS, "-c:a", "pcm_s16le", "-y", normalizedPath],
       600000
     );
 
@@ -241,9 +368,10 @@ export async function normalizeAudio(audioPath: string): Promise<string> {
     if (mode !== "basic" && !fallbackOk) {
       try {
         const fbChain = "highpass=f=100,lowpass=f=8000" +
-          (effectiveGain > 1 ? `,volume=${effectiveGain}dB` : "");
+          (effectiveGain > 1 ? `,volume=${effectiveGain}dB` : "") +
+          `,${LIMITER}`;
         await runFfmpeg(
-          ["-i", audioPath, "-af", fbChain, "-c:a", "pcm_s16le", "-y", normalizedPath],
+          ["-i", audioPath, "-af", fbChain, ...STT_OUTPUT_ARGS, "-c:a", "pcm_s16le", "-y", normalizedPath],
           300000
         );
         if (fs.statSync(normalizedPath).size > 0) {
@@ -258,7 +386,7 @@ export async function normalizeAudio(audioPath: string): Promise<string> {
       console.log(`  → Fallback: volume gain (${effectiveGain} dB)...`);
       try {
         await runFfmpeg(
-          ["-i", audioPath, "-af", `volume=${effectiveGain}dB`, "-c:a", "pcm_s16le", "-y", normalizedPath],
+          ["-i", audioPath, "-af", `volume=${effectiveGain}dB,${LIMITER}`, ...STT_OUTPUT_ARGS, "-c:a", "pcm_s16le", "-y", normalizedPath],
           300000
         );
         if (fs.statSync(normalizedPath).size > 0) fallbackOk = true;
@@ -296,6 +424,33 @@ export function isWhisperAvailable(): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * Report which ffmpeg binary resolved, and whether it actually runs.
+ *
+ * Called at startup. ffmpeg being absent used to be entirely invisible: every
+ * audio step silently fell back to the original file, so a missing binary only
+ * ever surfaced as an opaque Deepgram 400 on a long meeting. The
+ * @ffmpeg-installer binaries are optionalDependencies, so a failed platform
+ * install is NOT a build error — without this line nothing would report it.
+ */
+export function logFfmpegStatus(): void {
+  if (!config.audioNormalization.enabled) {
+    console.log(`  ffmpeg: skipped (AUDIO_NORMALIZE=false)`);
+    return;
+  }
+
+  if (isFFmpegAvailable()) {
+    console.log(`  ffmpeg: ✓ available (${FFMPEG_PATH})`);
+    return;
+  }
+
+  console.warn(
+    `  ffmpeg: ✗ NOT AVAILABLE (tried: ${FFMPEG_PATH}) — audio normalization and ` +
+    `container repair are DISABLED. Check that @ffmpeg-installer/ffmpeg installed ` +
+    `for this platform, or set FFMPEG_PATH.`
+  );
 }
 
 /**
@@ -482,44 +637,129 @@ interface DeepgramResponse {
   error?: string;
 }
 
+/**
+ * Transcode any container to a 16kHz mono PCM WAV.
+ *
+ * Two independent jobs, which is why it is not just "normalization":
+ *   1. Deepgram is most reliable with plain WAV — it avoids container-level
+ *      demuxing entirely (which is what rejects concatenated WebM).
+ *   2. Re-encoding re-times the stream, repairing the duplicated headers and
+ *      the cluster-timeline reset a concatenated recording carries.
+ *
+ * ffmpeg reports the duplicated header as "File ended prematurely" but still
+ * decodes every frame, so a non-zero exit alone is not fatal — we validate the
+ * output instead.
+ */
+async function transcodeToWav(inputPath: string): Promise<string> {
+  let outPath = inputPath.replace(/(\.\w+)$/, "_dgtemp.wav");
+  let counter = 1;
+  while (fs.existsSync(outPath)) {
+    outPath = inputPath.replace(/(\.\w+)$/, `_dgtemp_${counter}.wav`);
+    counter++;
+  }
+
+  try {
+    await runFfmpeg(
+      ["-i", inputPath, "-vn", "-ar", "16000", "-ac", "1", "-sample_fmt", "s16", "-y", outPath],
+      600000
+    );
+  } catch (err) {
+    // Salvage a partial transcode: a concatenated file makes ffmpeg exit
+    // non-zero ("File ended prematurely") even though the output is complete.
+    const usable =
+      fs.existsSync(outPath) &&
+      fs.statSync(outPath).size > 44 && // more than a bare WAV header
+      isWavFile(outPath);
+
+    if (!usable) throw err;
+
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`  ⚠ ffmpeg exited non-zero but produced valid WAV (${msg.slice(0, 80)})`);
+  }
+
+  if (!fs.existsSync(outPath) || fs.statSync(outPath).size <= 44) {
+    throw new Error("Transcode produced an empty WAV");
+  }
+
+  return outPath;
+}
+
+/** True if the file begins with the EBML magic (a Matroska/WebM document). */
+function startsWithEbmlMagic(filePath: string): boolean {
+  let fd: number | null = null;
+  try {
+    fd = fs.openSync(filePath, "r");
+    const head = Buffer.alloc(4);
+    if (fs.readSync(fd, head, 0, 4, 0) < 4) return false;
+    return head.equals(EBML_MAGIC);
+  } catch {
+    return false;
+  } finally {
+    if (fd !== null) { try { fs.closeSync(fd); } catch { /* ignore */ } }
+  }
+}
+
+/** Check a RIFF/WAVE header rather than trusting the file extension. */
+function isWavFile(filePath: string): boolean {
+  let fd: number | null = null;
+  try {
+    fd = fs.openSync(filePath, "r");
+    const head = Buffer.alloc(12);
+    if (fs.readSync(fd, head, 0, 12, 0) < 12) return false;
+    return (
+      head.toString("ascii", 0, 4) === "RIFF" &&
+      head.toString("ascii", 8, 12) === "WAVE"
+    );
+  } catch {
+    return false;
+  } finally {
+    if (fd !== null) { try { fs.closeSync(fd); } catch { /* ignore */ } }
+  }
+}
+
 async function transcribeDeepgram(audioPath: string, language?: string): Promise<string> {
   const apiKey = config.stt.deepgram.apiKey;
   const model = config.stt.deepgram.model;
   const lang = language || config.whisper.language;
 
-  // Step 1: Convert to WAV before sending (most reliable format for STT APIs)
-  // Browser-recorded webm (opus in webm container) can cause issues with Deepgram
+  // Step 1: Decide the wire format.
+  // - Healthy compressed uploads stream as-is: smaller, no CPU cost.
+  // - A concatenated recording is transcoded up front, because we know
+  //   Deepgram will reject it.
   let wavPath: string | null = null;
   let audioToSend = audioPath;
   const ext = path.extname(audioPath).toLowerCase();
 
-  try {
-    if (ext !== ".wav" && ext !== ".mp3") {
-      wavPath = audioPath.replace(/(\.\w+)$/, "_dgtemp.wav");
-      let counter = 1;
-      while (fs.existsSync(wavPath)) {
-        wavPath = audioPath.replace(/(\.\w+)$/, `_dgtemp_${counter}.wav`);
-        counter++;
-      }
+  const concat = isConcatenatedWebm(audioPath);
+  if (concat.concatenated) {
+    console.warn(
+      `  ⚠ Audio looks like two spliced recordings (2nd header @ byte ${concat.at}) — ` +
+      `transcoding before upload`
+    );
+  }
 
-      await runFfmpeg(
-        ["-i", audioPath, "-vn", "-ar", "16000", "-ac", "1", "-sample_fmt", "s16", "-y", wavPath],
-        120000
-      );
+  // A file claiming .wav/.mp3 can be lying — we hold one named ".wav" that is
+  // actually WebM. Send raw only when the bytes really are a plain WAV, since
+  // that is the one container guaranteed to need no demuxing.
+  const rawSendSafe = isWavFile(audioPath);
 
+  if (concat.concatenated || !rawSendSafe) {
+    try {
+      wavPath = await transcodeToWav(audioPath);
       audioToSend = wavPath;
+
       const origMB = (fs.statSync(audioPath).size / 1024 / 1024).toFixed(1);
       const wavMB = (fs.statSync(wavPath).size / 1024 / 1024).toFixed(1);
       console.log(`  → Converted ${ext} to WAV for Deepgram (${origMB} MB → ${wavMB} MB)`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`  ⚠ WAV conversion failed (${msg.substring(0, 100)}), sending original format`);
+      if (wavPath && fs.existsSync(wavPath)) {
+        try { fs.unlinkSync(wavPath); } catch { /* ignore */ }
+      }
+      wavPath = null;
+      audioToSend = audioPath;
     }
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`  ⚠ WAV conversion failed (${msg.substring(0, 100)}), sending original format`);
-    if (wavPath && fs.existsSync(wavPath)) {
-      try { fs.unlinkSync(wavPath); } catch { /* ignore */ }
-    }
-    wavPath = null;
-    audioToSend = audioPath;
   }
 
   // Build query params — optimized for meeting transcription
@@ -548,30 +788,24 @@ async function transcribeDeepgram(audioPath: string, language?: string): Promise
     searchParams.set("language", "en");
   }
 
-  const fileSize = fs.statSync(audioToSend).size;
-  const fileSizeMB = (fileSize / 1024 / 1024).toFixed(1);
-  console.log(`  → Sending to Deepgram API (model: ${model}, language: ${searchParams.get("language")}, file: ${fileSizeMB} MB)...`);
+  const url = `https://api.deepgram.com/v1/listen?${searchParams.toString()}`;
 
   // Stream the file body — avoids loading a multi-hundred-MB buffer into RAM
   // (a 2h meeting would OOM on Render's 512MB instance).
   // Content-Type must match the actual container (webm/opus, mp3), not "audio/wav".
   // Retry transient 5xx/429 responses (the WAV file must survive between
   // attempts, so cleanup happens in the finally below, not between attempts).
-  let response: Response;
-  try {
-    response = await withRetry(
-      () => requestLongTimeout(
-        `https://api.deepgram.com/v1/listen?${searchParams.toString()}`,
-        {
-          method: "POST",
-          headers: {
-            Authorization: `Token ${apiKey}`,
-            "Content-Type": getMimeType(audioToSend),
-            "Content-Length": String(fileSize),
-          },
-          body: fs.createReadStream(audioToSend),
-        }
-      ),
+  const send = (bodyPath: string): Promise<Response> =>
+    withRetry(
+      () => requestLongTimeout(url, {
+        method: "POST",
+        headers: {
+          Authorization: `Token ${apiKey}`,
+          "Content-Type": getMimeType(bodyPath),
+          "Content-Length": String(fs.statSync(bodyPath).size),
+        },
+        body: fs.createReadStream(bodyPath),
+      }),
       (err) => {
         // Retry on network-level errors (ECONNRESET, socket hang up, etc.)
         const msg = err instanceof Error ? err.message : String(err);
@@ -579,6 +813,39 @@ async function transcribeDeepgram(audioPath: string, language?: string): Promise
       },
       { maxRetries: 3, baseDelayMs: 1500 }
     );
+
+  let response: Response;
+  try {
+    const fileSizeMB = (fs.statSync(audioToSend).size / 1024 / 1024).toFixed(1);
+    console.log(`  → Sending to Deepgram API (model: ${model}, language: ${searchParams.get("language")}, file: ${fileSizeMB} MB)...`);
+
+    response = await send(audioToSend);
+
+    // Deepgram rejects a malformed container outright rather than degrading,
+    // which is what a concatenated WebM hits. If we streamed the original and
+    // got that 400, transcode once and retry — the transcode re-times the
+    // stream and normalizes it to WAV, which always parses.
+    if (!response.ok && response.status === 400 && audioToSend !== audioPath) {
+      const preview = (await response.text()).substring(0, 300);
+      if (/corrupt or unsupported data/i.test(preview)) {
+        console.warn(`  ⚠ Deepgram rejected the container — retrying from a transcoded WAV`);
+        try {
+          const retryWav = await transcodeToWav(audioPath);
+          if (wavPath && fs.existsSync(wavPath)) {
+            try { fs.unlinkSync(wavPath); } catch { /* ignore */ }
+          }
+          wavPath = retryWav;
+          audioToSend = retryWav;
+          response = await send(audioToSend);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.error(`  ✗ Transcode fallback failed: ${msg.slice(0, 200)}`);
+          response = new Response(preview, { status: 400 });
+        }
+      } else {
+        response = new Response(preview, { status: 400 });
+      }
+    }
   } finally {
     // Clean up temp WAV file (after retries complete, success or failure)
     if (wavPath && fs.existsSync(wavPath)) {

@@ -64,8 +64,8 @@ npm install
 # Install Python dependencies (for local whisper transcription)
 pip install faster-whisper
 
-# (Optional) Install ffmpeg for audio normalization
-brew install ffmpeg
+# ffmpeg comes bundled via @ffmpeg-installer/ffmpeg (installed by npm install) —
+# no brew/apt needed. Override with FFMPEG_PATH if you prefer your own build.
 
 # Copy env and set your API keys
 cp .env.example .env
@@ -206,7 +206,7 @@ The project includes `render.yaml` for one-click deploy on [Render](https://rend
 **On a paid instance type (Starter/Standard+):**
 - ✅ Always on — no 15-min inactivity spin-down, no "suspended by owner" surprise (suspension happens when a free service is manually paused or the account hits a billing state)
 - ❌ Still no Python runtime — local Whisper won't work; use **Deepgram Nova-3** cloud STT
-- ❌ Still no ffmpeg — audio normalization disabled (Deepgram accepts raw uploads)
+- ✅ ffmpeg works — bundled static binary via `@ffmpeg-installer/ffmpeg` (a normal npm dependency, so `npm install` in the build step provides it; no apt-get). Used for audio normalization and for transcoding uploads Deepgram rejects.
 - ✅ **Deepgram Nova-3** cloud STT works (set `DEEPGRAM_API_KEY`)
 - ✅ DeepSeek summarization works
 - ✅ All API endpoints work
@@ -226,6 +226,99 @@ The project includes `render.yaml` for one-click deploy on [Render](https://rend
 | `SUPABASE_PROJECT_REF` | Supabase project reference ID |
 | `SUPABASE_URL` | `https://<project>.supabase.co` (for storage + email-verified fallback) |
 | `SUPABASE_SERVICE_ROLE_KEY` | For storage + email-verified fallback (server-only, never expose) |
+| `FFMPEG_PATH` | *Optional* — override the bundled ffmpeg binary |
+
+## Troubleshooting: STT failures
+
+### `Deepgram API error (400): ... failed to process audio: corrupt or unsupported data`
+
+Deepgram received audio it could not demux. Reproduce it locally before changing
+any API parameters — the request is usually fine and the *file* is not:
+
+```bash
+# Pull the stored upload straight out of Supabase Storage and replay it
+curl -s "$SUPABASE_URL/storage/v1/object/meeting-audio/<recordingUrl>" \
+  -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" -o /tmp/clip.webm
+curl -s -X POST "https://api.deepgram.com/v1/listen?model=nova-3" \
+  -H "Authorization: Token $DEEPGRAM_API_KEY" \
+  -H "Content-Type: audio/webm" --data-binary @/tmp/clip.webm
+```
+
+**Known cause — concatenated recordings.** When the browser's `MediaRecorder` is
+stopped and restarted mid-meeting (pause/resume, tab sleep, reconnect), the
+frontend can splice the blobs into one file. Each recording carries its own EBML
+header + Segment, so the cluster timeline resets to zero partway through, and
+Deepgram rejects the whole file. Detect it by counting EBML headers
+(`1A 45 DF A3`) — a healthy WebM has exactly one, at offset 0:
+
+```bash
+xxd -p clip.webm | tr -d '\n' | grep -o '1a45dfa3' | wc -l   # >1 ⇒ concatenated
+```
+
+`transcribeDeepgram()` handles this automatically: it transcodes to WAV before
+upload when it detects a second header, and if Deepgram still returns 400
+`corrupt or unsupported data` it transcodes once and retries. The transcode
+re-times the stream, and the file is fully recoverable. **If this fires, the bug
+is on the frontend side** — it should start a fresh `MediaRecorder` on resume
+instead of appending blobs to the previous recording.
+
+**Never trust the upload's extension.** Filenames come from the client-supplied
+`originalname`, and storage already holds a file named `.wav` whose contents are
+actually WebM — someone downloaded a recording and re-uploaded it with a
+hand-typed name. Detection and the send-raw decision both sniff magic bytes
+(`isWavFile`, `startsWithEbmlMagic`), not the extension. Any new branch on this
+path should do the same.
+
+### Audio normalization: ordering matters in the filter chain
+
+The enhancement chain is order-sensitive, and two ordering rules are load-bearing:
+
+1. **`alimiter` must be last in `-af`.** The chains stack up to +16 dB of EQ
+   boost on top of up to +30 dB of gain with nothing to catch it, and meeting
+   recordings routinely arrive already peaking at 0 dBFS. Measured on a real
+   upload, that clipped hard — `astats` flat factor **9.3** (thousands of
+   flat-topped samples) → **0.0** with the limiter.
+
+2. **The 16 kHz/mono downmix must be output flags (`-ar 16000 -ac 1`), not
+   `aformat`/`aresample` inside `-af`.** Putting the resample in the chain
+   changes what the EQ and limiter operate on — measured flat factor 0.17 and a
+   ~2 dB loudness shift, vs 0.00 and no regression with it as an output option.
+
+When auditing levels, check the **flat factor**, not `max_volume`:
+`max_volume` reports **0.0 dB even in an unclipped file** because the following
+16 kHz resample overshoots on its own. `max_volume` alone will look alarming and
+tell you nothing.
+
+```bash
+ffmpeg -i out.wav -af astats=metadata=1 -f null - 2>&1 | grep "Flat factor"   # want 0.0
+```
+
+16 kHz mono is lossless here: every chain branch ends in `lowpass=f=8000`, so at
+16 kHz sampling nothing the chain passes falls above Nyquist. It also cuts the
+upload to Deepgram ~6x (48 min: 527 MB → 88 MB).
+
+### ffmpeg silently doing nothing
+
+`isFFmpegAvailable()` gates normalization. It once used `execSync` with a shell
+string, which breaks on paths containing spaces, and the binary path used to be
+hardcoded to `/opt/homebrew/bin/ffmpeg` (macOS-only). Both meant every ffmpeg
+step became a silent no-op in production. ffmpeg is now resolved from
+`FFMPEG_PATH` → `@ffmpeg-installer/ffmpeg` → `PATH`, and probed with `execFile`.
+
+**Startup now prints one of these — check it first:**
+
+```
+  ffmpeg: ✓ available (/path/to/node_modules/@ffmpeg-installer/linux-x64/ffmpeg)
+  ffmpeg: ✗ NOT AVAILABLE (tried: ffmpeg) — audio normalization and container repair are DISABLED.
+```
+
+The `@ffmpeg-installer/*` binaries are **optionalDependencies**, so a failed
+platform install is not a build error — npm carries on and you get the ✗ line
+rather than a failed deploy. That is deliberate: it makes the failure legible
+instead of silent, but it will not stop a bad deploy on its own.
+
+When debugging without the startup line, check the logs for
+`→ Applying audio enhancement` — if that never appears, ffmpeg is not being found.
 
 ## Architecture
 
@@ -254,6 +347,8 @@ Backend (this repo)                    Frontend (Lovable)
 - **Auth:** Supabase JWT — no custom login/register endpoints. JWKS verification with 60s clock skew tolerance. Email verification enforced.
 - **Local dev:** faster-whisper + ffmpeg audio normalization + DeepSeek
 - **Cloud (Render):** Deepgram Nova-3 STT + DeepSeek LLM + PostgreSQL (Supabase)
+  - ffmpeg is available here too (bundled npm binary) — used for audio
+    normalization and for repairing uploads Deepgram rejects
 - **Storage:** Audio files stored locally under `./audio/` or in Supabase Storage (configurable via `STORAGE_PROVIDER`)
 - **CORS:** Configurable via `CORS_ORIGINS` env var; `.lovable.app` and `.lovableproject.com` wildcard allowed
 - **Seed:** Idempotent — creates Default Workspace and assigns orphan meetings on first run

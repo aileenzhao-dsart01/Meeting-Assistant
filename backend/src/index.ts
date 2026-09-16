@@ -9,6 +9,7 @@ import { userRoutes } from "./routes/me";
 import { requireAuth } from "./middleware/auth";
 import { requireWorkspaceMembership } from "./middleware/workspace";
 import { errorHandler } from "./middleware/errorHandler";
+import { logFfmpegStatus } from "./services/transcription";
 
 const app = express();
 
@@ -146,6 +147,7 @@ async function main() {
     console.log(` LLM provider: ${config.llm.provider}`);
     console.log(` CORS origins: ${config.cors.origins.join(", ")}`);
     logConfig();
+    logFfmpegStatus();
   });
 
   // ---------- Graceful shutdown ----------
